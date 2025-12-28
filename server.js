@@ -17,104 +17,91 @@ const CONFIG = {
     CHAIN_ID: 8453,
     CONTRACT_ADDR: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
     MERKLE_RPC: "https://base.merkle.io",
-    
-    // 🔮 ORACLES
     GAS_ORACLE: "0x420000000000000000000000000000000000000F",
-    
-    // 🏦 ASSETS
     TOKENS: { 
         WETH: "0x4200000000000000000000000000000000000006", 
         USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         DEGEN: "0x4edbc9ba171790664872997239bc7a3f3a633190",
         AERO: "0x9401518c83Bf58717007e39F9ba4b2C7E759A5af"
     },
-
-    // ⚙️ EXECUTION
     LOAN_AMOUNT: ethers.parseEther("30"),
     GAS_LIMIT: 950000,
-    PRIORITY_BRIBE: 15n, // 15% Miner Tip
+    PRIORITY_BRIBE: 15n, 
     WHALE_THRESHOLD: ethers.parseEther("0.1")
 };
 
-// DUAL-LANE INFRASTRUCTURE
 const RPC_URL = process.env.QUICKNODE_HTTP || "https://mainnet.base.org";
 const WSS_URL = process.env.QUICKNODE_WSS || "wss://base-rpc.publicnode.com";
 
 // --- MASTER THREAD ---
 if (cluster.isPrimary) {
-    // Removed console.clear() to preserve startup errors
     console.log(`${TXT.bold}${TXT.gold}╔═══════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║       🔱 APEX v38.17.0 | MACH-1 CLUSTER       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   🔱 APEX v38.17.1 | RATE-LIMITED MODE      ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚═══════════════════════════════════════════════╝${TXT.reset}\n`);
     
-    console.log(`${TXT.cyan}[MASTER] Spawning Worker...${TXT.reset}`);
+    console.log(`${TXT.cyan}[MASTER] Spawning Single Worker...${TXT.reset}`);
     const worker = cluster.fork();
     
     worker.on('exit', (code, signal) => {
-        console.log(`${TXT.red}⚠️ Worker died (Code: ${code}, Signal: ${signal}). Respawning in 3s...${TXT.reset}`);
-        setTimeout(() => cluster.fork(), 3000);
+        console.log(`${TXT.red}⚠️ Worker died. Respawning in 5s...${TXT.reset}`);
+        setTimeout(() => cluster.fork(), 5000); // Slower respawn to cool down API
     });
 } else {
     runWorker().catch(err => {
-        console.error(`${TXT.red}❌ FATAL WORKER ERROR:${TXT.reset}`, err);
+        console.error(`${TXT.red}❌ FATAL ERROR:${TXT.reset}`, err.message);
         process.exit(1);
     });
 }
 
 // --- WORKER THREAD ---
 async function runWorker() {
-    // 1. SETUP
     const rawKey = process.env.TREASURY_PRIVATE_KEY;
     if (!rawKey) { 
-        console.error(`${TXT.red}❌ CONFIG ERROR: TREASURY_PRIVATE_KEY is missing in .env${TXT.reset}`); 
+        console.error(`${TXT.red}❌ CONFIG ERROR: TREASURY_PRIVATE_KEY missing${TXT.reset}`); 
         process.exit(1); 
     }
     
-    console.log(`${TXT.dim}[WORKER] Connecting to RPC: ${RPC_URL}...${TXT.reset}`);
+    console.log(`${TXT.dim}[WORKER] Connecting to RPC...${TXT.reset}`);
 
-    // Add static network to avoid auto-detection lag
-    const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true });
+    // RATE LIMITER: Use a standard JsonRpcProvider but catch 429 errors
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
     const signer = new ethers.Wallet(rawKey.trim(), provider);
     
-    // Contracts
     const flashContract = new ethers.Contract(CONFIG.CONTRACT_ADDR, [
         "function executeFlashArbitrage(address tokenA, address tokenOut, uint256 amount) external returns (uint256)"
     ], signer);
-    
-    const gasOracle = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes) view returns (uint256)"], provider);
 
-    // State
     let nextNonce;
-    
-    // TIMEOUT WRAPPER to prevent hanging on initial connection
-    try {
-        console.log(`${TXT.dim}[WORKER] Syncing Nonce (Timeout: 5s)...${TXT.reset}`);
-        const noncePromise = provider.getTransactionCount(signer.address);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RPC Connection Timeout")), 5000));
-        nextNonce = await Promise.race([noncePromise, timeoutPromise]);
-    } catch (e) {
-        console.error(`${TXT.red}❌ RPC CONNECTION FAILED: ${e.message}${TXT.reset}`);
-        console.log(`${TXT.yellow}➜ Please check your internet connection or RPC_URL in .env${TXT.reset}`);
-        process.exit(1);
-    }
-
-    let ws = null;
     let scanCount = 0;
     const seenHashes = new Set();
 
-    process.stdout.write(`${TXT.cyan}[INIT] Mach-1 Nonce Synced: ${nextNonce}${TXT.reset}\n`);
+    // 1. SAFE BOOT SEQUENCE
+    try {
+        // Wait random time to desync from other potential runners
+        await new Promise(r => setTimeout(r, Math.random() * 2000));
+        console.log(`${TXT.dim}[WORKER] Fetching Nonce...${TXT.reset}`);
+        nextNonce = await provider.getTransactionCount(signer.address);
+        console.log(`${TXT.cyan}[INIT] Nonce Synced: ${nextNonce}${TXT.reset}`);
+    } catch (e) {
+        console.error(`${TXT.red}❌ BOOT FAILED: ${e.message}${TXT.reset}`);
+        if (e.message.includes("429") || e.message.includes("limit")) {
+             console.log(`${TXT.yellow}➜ API Rate Limit Hit. Waiting 10s...${TXT.reset}`);
+             await new Promise(r => setTimeout(r, 10000));
+             process.exit(1); // Restart fresh
+        }
+        process.exit(1);
+    }
 
     // 2. CONNECTION LOGIC
+    let ws = null;
     function connect() {
-        if (ws) {
-            try { ws.terminate(); } catch(e){}
-        }
+        if (ws) { try { ws.terminate(); } catch(e){} }
         
-        console.log(`${TXT.dim}[WORKER] Connecting to WebSocket...${TXT.reset}`);
+        console.log(`${TXT.dim}[WORKER] Connecting WS...${TXT.reset}`);
         ws = new WebSocket(WSS_URL);
 
         ws.on('open', () => {
-            console.log(`${TXT.green}📡 RAW SOCKET CONNECTED${TXT.reset}`);
+            console.log(`${TXT.green}📡 SOCKET CONNECTED${TXT.reset}`);
             ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_subscribe", params: ["newPendingTransactions"] }));
         });
 
@@ -125,77 +112,48 @@ async function runWorker() {
                 if (txHash && !seenHashes.has(txHash)) {
                     seenHashes.add(txHash);
                     scanCount++;
-                    // Don't await this, run in background
-                    processTransaction(txHash).catch(err => { /* Silent fail on individual tx error */ }); 
+                    // Rate Limit: Only process 1 out of every 2 transactions to save API credits
+                    if (scanCount % 2 === 0) {
+                        processTransaction(txHash).catch(() => {}); 
+                    }
                 }
-            } catch (e) {
-                // Ignore parse errors
-            }
+            } catch (e) {}
         });
 
-        ws.on('close', () => {
-            console.log(`${TXT.yellow}⚠️ WS Closed. Reconnecting...${TXT.reset}`);
-            setTimeout(connect, 1000);
-        });
-        
-        ws.on('error', (err) => {
-            console.error(`${TXT.red}❌ WS Error: ${err.message}${TXT.reset}`);
-            ws.terminate();
-        });
+        ws.on('close', () => setTimeout(connect, 3000)); // Slower reconnect
+        ws.on('error', () => ws.terminate());
     }
 
-    // 3. ZERO-LATENCY PROCESSOR
+    // 3. SAFE PROCESSOR
     async function processTransaction(txHash) {
-        // A. AGGRESSIVE FETCH
+        // A. FETCH
         const tx = await provider.getTransaction(txHash).catch(() => null);
-        
-        // If node hasn't indexed it yet, skip
         if (!tx || !tx.value || tx.value < CONFIG.WHALE_THRESHOLD) return;
 
-        console.log(`\n${TXT.magenta}🎯 WHALE DETECTED: ${ethers.formatEther(tx.value)} ETH${TXT.reset}`);
+        console.log(`\n${TXT.magenta}🎯 WHALE: ${ethers.formatEther(tx.value)} ETH${TXT.reset}`);
 
-        // B. PARALLEL PATH SOLVING
-        const paths = [
-            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.DEGEN],
-            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.AERO],
-            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.USDC]
-        ];
-
-        const promises = paths.map(async (path) => {
-            const [tokenIn, tokenOut] = path;
-            try {
-                // Static Call Simulation
-                const profit = await flashContract.executeFlashArbitrage.staticCall(tokenIn, tokenOut, CONFIG.LOAN_AMOUNT);
-                return { profit: BigInt(profit), path };
-            } catch (e) {
-                return { profit: 0n, path };
+        // B. SIMULATION (Only simulate 1 path to save API calls)
+        try {
+            const profit = await flashContract.executeFlashArbitrage.staticCall(
+                CONFIG.TOKENS.WETH, CONFIG.TOKENS.DEGEN, CONFIG.LOAN_AMOUNT
+            );
+            
+            if (BigInt(profit) > 0n) {
+                console.log(`${TXT.gold}💰 PROFIT: ${ethers.formatEther(profit)} ETH${TXT.reset}`);
+                await executeStrike();
             }
-        });
-
-        const results = await Promise.all(promises);
-        const bestResult = results.reduce((max, curr) => curr.profit > max.profit ? curr : max, { profit: 0n });
-
-        // C. EXECUTION TRIGGER
-        if (bestResult.profit > 0n) {
-            console.log(`${TXT.gold}💰 PROFIT FOUND: ${ethers.formatEther(bestResult.profit)} ETH${TXT.reset}`);
-            await executeStrike(bestResult.path);
+        } catch (e) {
+            // Simulation failed, likely no profit
         }
     }
 
-    async function executeStrike(path) {
+    async function executeStrike() {
         try {
-            const [tokenIn, tokenOut] = path;
-            
-            // 1. Calculate Real Gas
             const feeData = await provider.getFeeData();
-            const txData = flashContract.interface.encodeFunctionData("executeFlashArbitrage", [tokenIn, tokenOut, CONFIG.LOAN_AMOUNT]);
-            // Optional: getL1Fee might fail on non-OP stacks, wrap it
-            // const l1Fee = await gasOracle.getL1Fee(txData).catch(() => 0n); 
-
-            // 2. Bribe Calculation
-            const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
+            const txData = flashContract.interface.encodeFunctionData("executeFlashArbitrage", [CONFIG.TOKENS.WETH, CONFIG.TOKENS.DEGEN, CONFIG.LOAN_AMOUNT]);
             
-            // 3. Send to Private RPC (Merkle) via Axios for privacy
+            const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
+
             const txObj = {
                 to: CONFIG.CONTRACT_ADDR,
                 data: txData,
@@ -209,27 +167,21 @@ async function runWorker() {
 
             const signedTx = await signer.signTransaction(txObj);
             
-            console.log(`${TXT.yellow}⚡ FIRING TO MERKLE...${TXT.reset}`);
-            const res = await axios.post(CONFIG.MERKLE_RPC, { 
+            console.log(`${TXT.yellow}⚡ FIRING...${TXT.reset}`);
+            // Use Merkle (Free) instead of QuickNode for sendRawTransaction
+            await axios.post(CONFIG.MERKLE_RPC, { 
                 jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [signedTx] 
             });
 
-            if (res.data.result) {
-                console.log(`${TXT.green}🚀 STRIKE SUCCESS: ${res.data.result}${TXT.reset}`);
-            } else {
-                console.log(`${TXT.red}❌ REVERTED: ${JSON.stringify(res.data)}${TXT.reset}`);
-            }
-
+            console.log(`${TXT.green}🚀 SENT${TXT.reset}`);
         } catch (e) {
-            console.log(`${TXT.red}❌ STRIKE ERROR: ${e.message}${TXT.reset}`);
             if (e.message.includes("nonce")) nextNonce = await provider.getTransactionCount(signer.address);
         }
     }
 
-    // Start
     setInterval(() => {
-        process.stdout.write(`\r${TXT.dim}[SCANNING]${TXT.reset} ${TXT.cyan}Mach-1 Active${TXT.reset} | ${TXT.silver}Tx Scanned: ${scanCount}${TXT.reset}    `);
-        seenHashes.clear(); 
+        process.stdout.write(`\r${TXT.dim}[SCANNING]${TXT.reset} Scanned: ${scanCount}    `);
+        seenHashes.clear();
     }, 5000);
     
     connect();
