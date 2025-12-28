@@ -42,27 +42,38 @@ const WSS_URL = process.env.QUICKNODE_WSS || "wss://base-rpc.publicnode.com";
 
 // --- MASTER THREAD ---
 if (cluster.isPrimary) {
-    console.clear();
+    // Removed console.clear() to preserve startup errors
     console.log(`${TXT.bold}${TXT.gold}╔═══════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║      🔱 APEX v38.17.0 | MACH-1 CLUSTER       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║       🔱 APEX v38.17.0 | MACH-1 CLUSTER       ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚═══════════════════════════════════════════════╝${TXT.reset}\n`);
     
+    console.log(`${TXT.cyan}[MASTER] Spawning Worker...${TXT.reset}`);
     const worker = cluster.fork();
-    worker.on('exit', () => {
-        console.log(`${TXT.red}⚠️ Worker died. Respawning...${TXT.reset}`);
-        cluster.fork();
+    
+    worker.on('exit', (code, signal) => {
+        console.log(`${TXT.red}⚠️ Worker died (Code: ${code}, Signal: ${signal}). Respawning in 3s...${TXT.reset}`);
+        setTimeout(() => cluster.fork(), 3000);
     });
 } else {
-    runWorker();
+    runWorker().catch(err => {
+        console.error(`${TXT.red}❌ FATAL WORKER ERROR:${TXT.reset}`, err);
+        process.exit(1);
+    });
 }
 
 // --- WORKER THREAD ---
 async function runWorker() {
     // 1. SETUP
     const rawKey = process.env.TREASURY_PRIVATE_KEY;
-    if (!rawKey) { console.error("❌ Key Missing"); process.exit(1); }
+    if (!rawKey) { 
+        console.error(`${TXT.red}❌ CONFIG ERROR: TREASURY_PRIVATE_KEY is missing in .env${TXT.reset}`); 
+        process.exit(1); 
+    }
     
-    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    console.log(`${TXT.dim}[WORKER] Connecting to RPC: ${RPC_URL}...${TXT.reset}`);
+
+    // Add static network to avoid auto-detection lag
+    const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true });
     const signer = new ethers.Wallet(rawKey.trim(), provider);
     
     // Contracts
@@ -73,7 +84,20 @@ async function runWorker() {
     const gasOracle = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes) view returns (uint256)"], provider);
 
     // State
-    let nextNonce = await provider.getTransactionCount(signer.address);
+    let nextNonce;
+    
+    // TIMEOUT WRAPPER to prevent hanging on initial connection
+    try {
+        console.log(`${TXT.dim}[WORKER] Syncing Nonce (Timeout: 5s)...${TXT.reset}`);
+        const noncePromise = provider.getTransactionCount(signer.address);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RPC Connection Timeout")), 5000));
+        nextNonce = await Promise.race([noncePromise, timeoutPromise]);
+    } catch (e) {
+        console.error(`${TXT.red}❌ RPC CONNECTION FAILED: ${e.message}${TXT.reset}`);
+        console.log(`${TXT.yellow}➜ Please check your internet connection or RPC_URL in .env${TXT.reset}`);
+        process.exit(1);
+    }
+
     let ws = null;
     let scanCount = 0;
     const seenHashes = new Set();
@@ -82,7 +106,11 @@ async function runWorker() {
 
     // 2. CONNECTION LOGIC
     function connect() {
-        if (ws) ws.terminate();
+        if (ws) {
+            try { ws.terminate(); } catch(e){}
+        }
+        
+        console.log(`${TXT.dim}[WORKER] Connecting to WebSocket...${TXT.reset}`);
         ws = new WebSocket(WSS_URL);
 
         ws.on('open', () => {
@@ -91,61 +119,67 @@ async function runWorker() {
         });
 
         ws.on('message', async (data) => {
-            const parsed = JSON.parse(data);
-            const txHash = parsed.params?.result;
-            if (txHash && !seenHashes.has(txHash)) {
-                seenHashes.add(txHash);
-                scanCount++;
-                processTransaction(txHash); // Fire and forget (Async)
+            try {
+                const parsed = JSON.parse(data);
+                const txHash = parsed.params?.result;
+                if (txHash && !seenHashes.has(txHash)) {
+                    seenHashes.add(txHash);
+                    scanCount++;
+                    // Don't await this, run in background
+                    processTransaction(txHash).catch(err => { /* Silent fail on individual tx error */ }); 
+                }
+            } catch (e) {
+                // Ignore parse errors
             }
         });
 
-        ws.on('close', () => setTimeout(connect, 1000));
-        ws.on('error', () => ws.terminate());
+        ws.on('close', () => {
+            console.log(`${TXT.yellow}⚠️ WS Closed. Reconnecting...${TXT.reset}`);
+            setTimeout(connect, 1000);
+        });
+        
+        ws.on('error', (err) => {
+            console.error(`${TXT.red}❌ WS Error: ${err.message}${TXT.reset}`);
+            ws.terminate();
+        });
     }
 
     // 3. ZERO-LATENCY PROCESSOR
     async function processTransaction(txHash) {
-        try {
-            // A. AGGRESSIVE FETCH (Replaces wait loop)
-            // We race the fetch against a timeout to ensure we don't hang
-            const tx = await provider.getTransaction(txHash).catch(() => null);
-            
-            // If node hasn't indexed it yet, skip immediately to save CPU
-            if (!tx || !tx.value || tx.value < CONFIG.WHALE_THRESHOLD) return;
+        // A. AGGRESSIVE FETCH
+        const tx = await provider.getTransaction(txHash).catch(() => null);
+        
+        // If node hasn't indexed it yet, skip
+        if (!tx || !tx.value || tx.value < CONFIG.WHALE_THRESHOLD) return;
 
-            console.log(`\n${TXT.magenta}🎯 WHALE DETECTED: ${ethers.formatEther(tx.value)} ETH${TXT.reset}`);
+        console.log(`\n${TXT.magenta}🎯 WHALE DETECTED: ${ethers.formatEther(tx.value)} ETH${TXT.reset}`);
 
-            // B. PARALLEL PATH SOLVING (Omniscient)
-            // We simulate all 3 paths at the exact same time
-            const paths = [
-                [CONFIG.TOKENS.WETH, CONFIG.TOKENS.DEGEN],
-                [CONFIG.TOKENS.WETH, CONFIG.TOKENS.AERO],
-                [CONFIG.TOKENS.WETH, CONFIG.TOKENS.USDC]
-            ];
+        // B. PARALLEL PATH SOLVING
+        const paths = [
+            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.DEGEN],
+            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.AERO],
+            [CONFIG.TOKENS.WETH, CONFIG.TOKENS.USDC]
+        ];
 
-            const promises = paths.map(async (path) => {
-                const [tokenIn, tokenOut] = path;
-                try {
-                    // Static Call Simulation
-                    const profit = await flashContract.executeFlashArbitrage.staticCall(tokenIn, tokenOut, CONFIG.LOAN_AMOUNT);
-                    return { profit: BigInt(profit), path };
-                } catch (e) {
-                    return { profit: 0n, path };
-                }
-            });
-
-            // Wait for all simulations to finish
-            const results = await Promise.all(promises);
-            const bestResult = results.reduce((max, curr) => curr.profit > max.profit ? curr : max, { profit: 0n });
-
-            // C. EXECUTION TRIGGER
-            if (bestResult.profit > 0n) {
-                console.log(`${TXT.gold}💰 PROFIT FOUND: ${ethers.formatEther(bestResult.profit)} ETH${TXT.reset}`);
-                await executeStrike(bestResult.path);
+        const promises = paths.map(async (path) => {
+            const [tokenIn, tokenOut] = path;
+            try {
+                // Static Call Simulation
+                const profit = await flashContract.executeFlashArbitrage.staticCall(tokenIn, tokenOut, CONFIG.LOAN_AMOUNT);
+                return { profit: BigInt(profit), path };
+            } catch (e) {
+                return { profit: 0n, path };
             }
+        });
 
-        } catch (e) { /* Ignore standard noise */ }
+        const results = await Promise.all(promises);
+        const bestResult = results.reduce((max, curr) => curr.profit > max.profit ? curr : max, { profit: 0n });
+
+        // C. EXECUTION TRIGGER
+        if (bestResult.profit > 0n) {
+            console.log(`${TXT.gold}💰 PROFIT FOUND: ${ethers.formatEther(bestResult.profit)} ETH${TXT.reset}`);
+            await executeStrike(bestResult.path);
+        }
     }
 
     async function executeStrike(path) {
@@ -155,13 +189,13 @@ async function runWorker() {
             // 1. Calculate Real Gas
             const feeData = await provider.getFeeData();
             const txData = flashContract.interface.encodeFunctionData("executeFlashArbitrage", [tokenIn, tokenOut, CONFIG.LOAN_AMOUNT]);
-            const l1Fee = await gasOracle.getL1Fee(txData).catch(() => 0n);
+            // Optional: getL1Fee might fail on non-OP stacks, wrap it
+            // const l1Fee = await gasOracle.getL1Fee(txData).catch(() => 0n); 
 
             // 2. Bribe Calculation
             const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
             
             // 3. Send to Private RPC (Merkle) via Axios for privacy
-            // Note: We use the local Nonce to be faster than asking the node
             const txObj = {
                 to: CONFIG.CONTRACT_ADDR,
                 data: txData,
@@ -188,15 +222,14 @@ async function runWorker() {
 
         } catch (e) {
             console.log(`${TXT.red}❌ STRIKE ERROR: ${e.message}${TXT.reset}`);
-            // If nonce error, resync
             if (e.message.includes("nonce")) nextNonce = await provider.getTransactionCount(signer.address);
         }
     }
 
     // Start
     setInterval(() => {
-        process.stdout.write(`\r${TXT.dim}[SCANNING]${TXT.reset} ${TXT.cyan}Mach-1 Active${TXT.reset} | ${TXT.silver}Tx Scanned: ${scanCount}${TXT.reset}   `);
-        seenHashes.clear(); // Clear memory every 5s to keep RAM low
+        process.stdout.write(`\r${TXT.dim}[SCANNING]${TXT.reset} ${TXT.cyan}Mach-1 Active${TXT.reset} | ${TXT.silver}Tx Scanned: ${scanCount}${TXT.reset}    `);
+        seenHashes.clear(); 
     }, 5000);
     
     connect();
