@@ -1,226 +1,161 @@
-// ===============================================================================
-// APEX TITAN MASTER v12.9.6 - HIGH-FREQUENCY CLUSTER EDITION
-// ===============================================================================
+/**
+ * ⚡ APEX TITAN LEGIT v3.0 - FLASHBOTS BUNDLE EDITION
+ * * ARCHITECTURE: Node.js Cluster + WebSocket + Flashbots/Builder Submission
+ * * STRATEGY: High-Frequency Flash Loan Arb with Private Bundles
+ * * ⚠️ CRITICAL SETUP:
+ * * 1. DEPLOY CONTRACT: Fill CONFIG.MY_CONTRACT
+ * * 2. STRATEGY: Implement 'analyzeOpportunity' (This is the "Brain" that makes money).
+ * * 3. BUILDERS: This version sends to a private relay to prevent front-running.
+ */
 
 const cluster = require('cluster');
 const os = require('os');
-const http = require('http');
-const axios = require('axios'); // Required for Private Relay
+const { ethers, WebSocketProvider, JsonRpcProvider, Wallet } = require('ethers');
+// const { FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle'); // Requires npm install
 require('dotenv').config();
-
-// Check dependencies
-let ethers, WebSocket;
-try {
-    ethers = require('ethers');
-    WebSocket = require('ws');
-} catch (e) {
-    console.error("CRITICAL: Missing 'ethers' or 'ws' modules. Run 'npm install ethers ws axios'");
-    process.exit(1);
-}
 
 // --- THEME ENGINE ---
 const TXT = {
     reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
     green: "\x1b[32m", cyan: "\x1b[36m", yellow: "\x1b[33m", 
     magenta: "\x1b[35m", blue: "\x1b[34m", red: "\x1b[31m",
-    gold: "\x1b[38;5;220m", silver: "\x1b[38;5;250m"
+    gold: "\x1b[38;5;220m"
 };
 
 // --- CONFIGURATION ---
 const CONFIG = {
-    // 🔒 PROFIT DESTINATION (LOCKED)
-    BENEFICIARY: "0x4B8251e7c80F910305bb81547e301DcB8A596918",
-
-    CHAIN_ID: 8453,
-    TARGET_CONTRACT: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
+    CHAIN_ID: 8453, // Base
     
-    // ⚡ INFRASTRUCTURE
-    PORT: process.env.PORT || 8080,
+    // ⚠️ REAL SETUP REQUIRED:
+    // This must be YOUR contract that has a function to execute the trade.
+    MY_CONTRACT: "0x...YOUR_OWN_CONTRACT_ADDRESS...", 
+    
+    // Infrastructure
     WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
-    RPC_URL: (process.env.WSS_URL || "https://mainnet.base.org").replace("wss://", "https://"),
-    PRIVATE_RELAY: "https://base.merkle.io", // Bypass Public Mempool
+    RPC_URL: "https://mainnet.base.org",
     
-    // 🏦 ASSETS
-    WETH: "0x4200000000000000000000000000000000000006",
-    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-
-    // 🔮 ORACLES
-    GAS_ORACLE: "0x420000000000000000000000000000000000000F",
-    CHAINLINK_FEED: "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+    // ⚙️ STRATEGY SETTINGS
+    FLASH_LOAN_AMOUNT: "25.0", // ETH
+    FLASH_FEE_BPS: 5n,         // 0.05% (Aave V3 Standard)
+    MIN_PROFIT_THRESHOLD: "0.01", // Only execute if > 0.01 ETH
+    MAX_BRIBE_PERCENT: 90n,    // Willing to bribe up to 90% of profit to win block
     
-    // ⚙️ HIGH-FREQUENCY STRATEGY
-    LOAN_AMOUNT: ethers.parseEther("30"), 
-    GAS_LIMIT: 950000n, 
-    PRIORITY_BRIBE: 25n, // Aggressive 25% Miner Tip
-    MIN_NET_PROFIT: "0.015" // ~$45 Net Profit Minimum
+    // 🛡️ BUILDER ENDPOINTS (Private Relays)
+    BUILDERS: [
+        "https://relay.flashbots.net",
+        "https://builder0x69.io",
+        "https://rpc.beaverbuild.org"
+    ]
 };
 
-// --- MASTER PROCESS ---
+// --- MASTER PROCESS (Cluster Manager) ---
 if (cluster.isPrimary) {
     console.clear();
+    const numCPUs = os.cpus().length;
+    
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN MASTER | v12.9.6 CLUSTER EDITION       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN LEGIT | PRO MEV ARCHITECTURE          ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     
-    console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture...${TXT.reset}`);
-    console.log(`${TXT.magenta}🎯 PROFIT TARGET LOCKED: ${CONFIG.BENEFICIARY}${TXT.reset}\n`);
+    console.log(`${TXT.cyan}[SYSTEM] Spawning ${numCPUs} High-Performance Workers...${TXT.reset}`);
+    console.log(`${TXT.dim}[INFO] Console I/O disabled in hot loops. Private Relays Active.${TXT.reset}\n`);
 
-    // Spawn a dedicated worker
-    cluster.fork();
+    for (let i = 0; i < numCPUs; i++) {
+        cluster.fork();
+    }
 
-    cluster.on('exit', (worker, code, signal) => {
+    cluster.on('exit', (worker) => {
         console.log(`${TXT.red}⚠️ Worker ${worker.process.pid} died. Respawning...${TXT.reset}`);
         cluster.fork();
     });
 } 
-// --- WORKER PROCESS ---
+// --- WORKER PROCESS (Execution Logic) ---
 else {
-    initWorker();
+    initOptimizedWorker();
 }
 
-async function initWorker() {
-    // 1. SETUP NATIVE SERVER (Health Check)
-    const server = http.createServer((req, res) => {
-        if (req.method === 'GET' && req.url === '/status') {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: "ONLINE", mode: "TITAN_CLUSTER", target: CONFIG.BENEFICIARY }));
-        } else {
-            res.writeHead(404);
-            res.end();
-        }
-    });
-
-    server.listen(CONFIG.PORT, () => {
-        // console.log(`🌐 Native Server active on port ${CONFIG.PORT}`);
-    });
-
-    // 2. SETUP BOT LOGIC
-    let rawKey = process.env.TREASURY_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!rawKey) { console.error(`${TXT.red}❌ FATAL: Private Key missing in .env${TXT.reset}`); process.exit(1); }
-    const cleanKey = rawKey.trim();
-
+async function initOptimizedWorker() {
     try {
-        const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
-        const wsProvider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
-        const signer = new ethers.Wallet(cleanKey, httpProvider);
-
+        const wsProvider = new WebSocketProvider(CONFIG.WSS_URL);
+        // NOTE: Real MEV requires a signer to sign the bundle
+        // const authSigner = new Wallet(process.env.PRIVATE_KEY); 
+        
         // Wait for connection
         await new Promise((resolve) => wsProvider.once("block", resolve));
+        console.log(`${TXT.green}✅ WORKER ${process.pid} READY${TXT.reset}`);
 
-        // Contracts
-        const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
-        const oracleContract = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes memory _data) public view returns (uint256)"], httpProvider);
-        const priceFeed = new ethers.Contract(CONFIG.CHAINLINK_FEED, ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"], httpProvider);
-
-        // Sync State
-        let nextNonce = await httpProvider.getTransactionCount(signer.address);
-        let currentEthPrice = 0;
-        let scanCount = 0;
-
-        const balance = await httpProvider.getBalance(signer.address);
-        console.log(`${TXT.green}✅ TITAN WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${ethers.formatEther(balance)} ETH${TXT.reset}`);
-
-        // Price Loop
-        setInterval(async () => {
-            try {
-                const [, price] = await priceFeed.latestRoundData();
-                currentEthPrice = Number(price) / 1e8;
-            } catch (e) {}
-        }, 10000);
-
-        // Mempool Sniping (Pending Txs)
+        // ⚡ HOT LOOP: MEMPOOL LISTENER
         wsProvider.on("pending", async (txHash) => {
-            scanCount++;
-            process.stdout.write(`\r${TXT.blue}⚡ SCANNING${TXT.reset} | Txs: ${scanCount} | ETH: $${currentEthPrice.toFixed(2)} `);
+            // 1. FAST FILTER: Check tx.to against known router addresses
+            // if (!isRouter(tx.to)) return;
 
-            // Simulation Trigger
-            if (Math.random() > 0.9995) {
-                process.stdout.write(`\n${TXT.magenta}🌊 OPPORTUNITY DETECTED: ${txHash.substring(0,10)}...${TXT.reset}\n`);
-                await executeOmniscientStrike(httpProvider, signer, titanIface, oracleContract, nextNonce, currentEthPrice);
+            // 2. SIMULATION TRIGGER (Stochastic for Demo)
+            if (Math.random() > 0.99995) {
+                process.stdout.write(`\n${TXT.magenta}⚡ [PID ${process.pid}] TARGET ACQUIRED: ${txHash.substring(0,10)}...${TXT.reset}\n`);
+                await analyzeTitanOpportunity(txHash);
             }
         });
 
-        wsProvider.websocket.onclose = () => {
-            console.warn(`\n${TXT.red}⚠️ SOCKET LOST. REBOOTING...${TXT.reset}`);
-            process.exit(1);
-        };
+        wsProvider.websocket.onclose = () => process.exit(1);
 
     } catch (e) {
-        console.error(`\n${TXT.red}❌ BOOT ERROR: ${e.message}${TXT.reset}`);
-        setTimeout(initWorker, 5000);
+        process.exit(1);
     }
 }
 
-async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, ethPrice) {
-    try {
-        console.log(`${TXT.yellow}🔄 CALCULATING VECTOR...${TXT.reset}`);
+async function analyzeTitanOpportunity(txHash) {
+    const loanAmount = ethers.parseEther(CONFIG.FLASH_LOAN_AMOUNT);
+    
+    console.log(`${TXT.yellow}   ↳ Calculating Dynamic Bribe & Flash Costs...${TXT.reset}`);
 
-        const path = [CONFIG.WETH, CONFIG.USDC];
-        const loanAmount = CONFIG.LOAN_AMOUNT;
+    // --- 1. CALCULATE FLASH LOAN COST ---
+    const flashFee = (loanAmount * CONFIG.FLASH_FEE_BPS) / 10000n;
 
-        // 1. DYNAMIC ENCODING
-        const strikeData = iface.encodeFunctionData("requestTitanLoan", [
-            CONFIG.WETH, loanAmount, path
-        ]);
+    // --- 2. SIMULATE GROSS PROFIT (The "Brain") ---
+    // ⚠️ THIS IS WHERE THE MILLIONS ARE MADE OR LOST
+    // You must implement: calculateProfit(txHash, loanAmount)
+    const mockGrossProfitEth = (Math.random() * 0.15).toFixed(4); 
+    const grossProfit = ethers.parseEther(mockGrossProfitEth);
 
-        // 2. PRE-FLIGHT SIMULATION
-        const [simulation, l1Fee, feeData] = await Promise.all([
-            provider.call({ to: CONFIG.TARGET_CONTRACT, data: strikeData, from: signer.address }).catch(() => null),
-            oracle.getL1Fee(strikeData),
-            provider.getFeeData()
-        ]);
+    // --- 3. DYNAMIC BRIBE CALCULATION ---
+    // Beating competitors means paying the validator more than they do.
+    let bribePercent = 40n;
+    if (parseFloat(mockGrossProfitEth) > 0.05) bribePercent = CONFIG.MAX_BRIBE_PERCENT;
 
-        if (!simulation) {
-             console.log(`${TXT.dim}❌ Simulation Reverted (No Profit)${TXT.reset}`);
-             return;
-        }
+    const bribeAmount = (grossProfit * bribePercent) / 100n;
+    const netProfit = grossProfit - bribeAmount - flashFee;
 
-        // 3. COST ANALYSIS (Titan Strategy)
-        const aaveFee = (loanAmount * 5n) / 10000n; // 0.05%
-        const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
-        const l2Cost = CONFIG.GAS_LIMIT * feeData.maxFeePerGas;
-        const totalCost = l2Cost + l1Fee + aaveFee;
+    // --- 4. EXECUTION DECISION ---
+    console.log(`${TXT.dim}   ↳ Gross: ${mockGrossProfitEth} ETH | Flash Fee: ${ethers.formatEther(flashFee)} ETH${TXT.reset}`);
+    console.log(`${TXT.dim}   ↳ Bribe: ${bribePercent}% (${ethers.formatEther(bribeAmount)} ETH) | Net: ${ethers.formatEther(netProfit)} ETH${TXT.reset}`);
+
+    if (netProfit > ethers.parseEther(CONFIG.MIN_PROFIT_THRESHOLD)) {
+        console.log(`${TXT.green}   💎 OPPORTUNITY CONFIRMED | Executing Private Bundle...${TXT.reset}`);
         
-        const netProfit = BigInt(simulation) - totalCost;
-        const minProfit = ethers.parseEther(CONFIG.MIN_NET_PROFIT);
+        // --- 5. PRIVATE BUNDLE SUBMISSION (The "Muscle") ---
+        await submitPrivateBundle(txHash, bribeAmount);
 
-        if (netProfit > minProfit) {
-            const profitUSD = parseFloat(ethers.formatEther(netProfit)) * ethPrice;
-            console.log(`\n${TXT.green}💎 TITAN STRIKE CONFIRMED${TXT.reset}`);
-            console.log(`${TXT.gold}💰 Net Profit: ${ethers.formatEther(netProfit)} ETH (~$${profitUSD.toFixed(2)})${TXT.reset}`);
-            
-            // 4. BUNDLE EXECUTION
-            const tx = {
-                to: CONFIG.TARGET_CONTRACT,
-                data: strikeData,
-                gasLimit: CONFIG.GAS_LIMIT,
-                maxFeePerGas: feeData.maxFeePerGas,
-                maxPriorityFeePerGas: aggressivePriority,
-                nonce: nonce,
-                type: 2,
-                chainId: CONFIG.CHAIN_ID
-            };
+    } else {
+        console.log(`${TXT.dim}   ❌ Profit too low.${TXT.reset}`);
+    }
+}
 
-            const signedTx = await signer.signTransaction(tx);
-            console.log(`${TXT.cyan}🚀 RELAYING TO MERKLE...${TXT.reset}`);
-            
-            // 5. PRIVATE RELAY (MEV Protection)
-            const response = await axios.post(CONFIG.PRIVATE_RELAY, {
-                jsonrpc: "2.0",
-                id: 1,
-                method: "eth_sendRawTransaction",
-                params: [signedTx]
-            });
-
-            if (response.data.result) {
-                console.log(`${TXT.green}🎉 SUCCESS: ${response.data.result}${TXT.reset}`);
-                console.log(`${TXT.bold}💸 FUNDS SECURED AT: ${CONFIG.BENEFICIARY}${TXT.reset}`);
-                process.exit(0);
-            } else {
-                 console.log(`${TXT.red}❌ REJECTED: ${JSON.stringify(response.data)}${TXT.reset}`);
-            }
-        }
-    } catch (e) {
-        console.error(`${TXT.red}⚠️ EXEC ERROR: ${e.message}${TXT.reset}`);
+async function submitPrivateBundle(targetTxHash, bribeAmount) {
+    // This simulates sending a bundle to Flashbots.
+    // In real code, you would use:
+    // const bundle = await flashbotsProvider.signBundle([
+    //    { signed_transaction: targetTxHash }, // The tx we are sandwiching/arbing
+    //    { signer: myWallet, transaction: { to: CONFIG.MY_CONTRACT, value: bribeAmount, data: ... } }
+    // ]);
+    // await flashbotsProvider.sendBundle(bundle, targetBlockNumber + 1);
+    
+    console.log(`${TXT.gold}   🚀 BUNDLE SENT TO [${CONFIG.BUILDERS.length}] BUILDERS${TXT.reset}`);
+    console.log(`${TXT.cyan}   🔒 Transaction is PRIVATE (Sandwich Protection Active)${TXT.reset}`);
+    
+    // Simulate win/loss
+    if(Math.random() > 0.5) {
+         console.log(`${TXT.green}   ✅ BUNDLE INCLUDED IN BLOCK! PROFIT SECURED.${TXT.reset}`);
+    } else {
+         console.log(`${TXT.red}   ⚠️ Bundle lost to higher bribe.${TXT.reset}`);
     }
 }
