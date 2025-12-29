@@ -1,6 +1,11 @@
-// ===============================================================================
-// APEX HYPER-HEURISTIC STRIKER v34.1 - ROBUST CONNECTIVITY PATCH
-// ===============================================================================
+/**
+ * APEX HYPER-HEURISTIC STRIKER v35.0 (Multi-Pool Edition)
+ * Combines High-Frequency Trading Logic with Robust Multi-Pool RPC Routing.
+ * * New Features:
+ * - Multi-Pool RPC Router: Automatically fails over between private and public pools.
+ * - Load Balancing: ROUND_ROBIN strategy for pool endpoints.
+ * - Robust Provider: Patches ethers.js to use the router for all HTTP requests.
+ */
 
 const cluster = require('cluster');
 const os = require('os');
@@ -18,7 +23,121 @@ try {
     process.exit(1);
 }
 
-// --- THEME ENGINE ---
+// ===============================================================================
+// PART 1: MULTI-POOL RPC ROUTER SYSTEM
+// ===============================================================================
+
+const PoolStrategy = {
+    ROUND_ROBIN: 'ROUND_ROBIN',
+    RANDOM: 'RANDOM',
+};
+
+/**
+ * Represents a single group of RPC endpoints (e.g., "Primary", "Public Backup").
+ */
+class RpcPool {
+    constructor(config) {
+        this.name = config.name;
+        this.endpoints = config.endpoints; // Array of { url, headers }
+        this.strategy = config.strategy || PoolStrategy.ROUND_ROBIN;
+        this.currentIndex = 0;
+        this.retries = config.retriesPerEndpoint || 1;
+        this.timeout = config.timeoutMs || 5000;
+    }
+
+    getExecutionOrder() {
+        if (this.endpoints.length === 0) return [];
+
+        if (this.strategy === PoolStrategy.RANDOM) {
+            const shuffled = [...this.endpoints];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            return shuffled;
+        }
+
+        // ROUND_ROBIN
+        const ordered = [];
+        for (let i = 0; i < this.endpoints.length; i++) {
+            const idx = (this.currentIndex + i) % this.endpoints.length;
+            ordered.push(this.endpoints[idx]);
+        }
+        
+        // Advance index for next time to distribute load
+        this.currentIndex = (this.currentIndex + 1) % this.endpoints.length;
+        return ordered;
+    }
+}
+
+/**
+ * The main router that manages multiple pools.
+ */
+class MultiPoolRpcRouter {
+    constructor(pools) {
+        this.pools = pools;
+    }
+
+    /**
+     * Orchestrates the request across pools and endpoints.
+     */
+    async request(payload) {
+        const errors = [];
+        // Unique ID for logging if needed, or use payload ID
+        const requestId = payload.id || Math.floor(Math.random() * 100000);
+
+        // 1. Iterate through Pools (Priority Order)
+        for (const pool of this.pools) {
+            const endpoints = pool.getExecutionOrder();
+
+            // 2. Iterate through Endpoints within the Pool
+            for (const endpoint of endpoints) {
+                try {
+                    // Attempt the call
+                    const result = await this.executeRpcCall(endpoint, payload, pool.timeout);
+                    return result;
+
+                } catch (err) {
+                    const msg = `[${pool.name}] Failed: ${err.message}`;
+                    // console.warn(msg); // Optional: Uncomment for debug
+                    errors.push(msg);
+                }
+            }
+        }
+
+        throw new Error(`All RPC pools failed. Errors: ${errors.join(', ')}`);
+    }
+
+    /**
+     * Real Network Implementation using Axios
+     */
+    async executeRpcCall(endpoint, payload, timeoutMs) {
+        try {
+            const response = await axios.post(endpoint.url, {
+                jsonrpc: "2.0",
+                method: payload.method,
+                params: payload.params,
+                id: payload.id || 1
+            }, {
+                timeout: timeoutMs,
+                headers: endpoint.headers || { 'Content-Type': 'application/json' }
+            });
+
+            if (response.data.error) {
+                throw new Error(response.data.error.message || "RPC Error returned from node");
+            }
+            
+            return response.data.result;
+        } catch (error) {
+            throw error;
+        }
+    }
+}
+
+// ===============================================================================
+// PART 2: APEX STRIKER CONFIGURATION & THEME
+// ===============================================================================
+
 const TXT = {
     reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
     green: "\x1b[32m", cyan: "\x1b[36m", yellow: "\x1b[33m", 
@@ -26,19 +145,41 @@ const TXT = {
     gold: "\x1b[38;5;220m", silver: "\x1b[38;5;250m"
 };
 
-// --- CONFIGURATION ---
 const CONFIG = {
-    // 🔒 PROFIT DESTINATION (LOCKED)
+    // 🔒 PROFIT DESTINATION
     BENEFICIARY: "0x4B8251e7c80F910305bb81547e301DcB8A596918",
-
     CHAIN_ID: 8453,
     TARGET_CONTRACT: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
     
-    // ⚡ INFRASTRUCTURE
-    PORT: process.env.PORT || 8080,
+    // ⚡ RPC CONFIGURATION (NEW)
+    // We replace the single RPC_URL with Pool Configurations
+    POOLS: [
+        {
+            name: "PRIMARY_PRIVATE",
+            strategy: PoolStrategy.ROUND_ROBIN,
+            timeoutMs: 1500,
+            endpoints: [
+                // Replace with your real private nodes or high-quality auth nodes
+                { url: (process.env.RPC_URL || "https://mainnet.base.org") } 
+            ]
+        },
+        {
+            name: "PUBLIC_BACKUP",
+            strategy: PoolStrategy.RANDOM,
+            timeoutMs: 3000,
+            endpoints: [
+                { url: "https://base.llamarpc.com" },
+                { url: "https://base-rpc.publicnode.com" },
+                { url: "https://1rpc.io/base" }
+            ]
+        }
+    ],
+
+    // WebSocket still requires a direct connection for subscriptions
     WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
-    RPC_URL: (process.env.WSS_URL || "https://mainnet.base.org").replace("wss://", "https://"),
-    PRIVATE_RELAY: "https://base.merkle.io", // Stealth Mode
+    
+    PORT: process.env.PORT || 8080,
+    PRIVATE_RELAY: "https://base.merkle.io",
     
     // 🌐 ASSET SOURCES
     TOKEN_LISTS: [
@@ -51,7 +192,7 @@ const CONFIG = {
         UNISWAP_V3: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
     },
 
-    // 🏦 CORE ASSETS (The "Alpha" List)
+    // 🏦 CORE ASSETS
     CORE_ASSETS: {
         WETH: "0x4200000000000000000000000000000000000006",
         USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -62,41 +203,40 @@ const CONFIG = {
         BRETT: "0x532f27101965dd16442e59d40670faf5ebb142e4"
     },
 
-    // 🔮 ORACLES
     GAS_ORACLE: "0x420000000000000000000000000000000000000F",
     CHAINLINK_FEED: "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
     
-    // ⚙️ BASE PARAMETERS
     GAS_LIMIT: 1500000n, 
     MIN_NET_PROFIT: "0.01" 
 };
 
-// --- HYPER-HEURISTIC ENGINE (AI) ---
+// ===============================================================================
+// PART 3: HYPER-HEURISTIC ENGINE
+// ===============================================================================
+
 class HyperHeuristicEngine {
     constructor() {
-        this.gasEma = 0; // Exponential Moving Average for Trend Detection
-        this.alpha = 0.25; // Sensitivity Factor (Higher = Faster Reaction)
+        this.gasEma = 0;
+        this.alpha = 0.25;
         this.volatility = 0;
         this.mode = "CRUISE";
-        this.coreFocusRatio = 0.7; // Default 70% Core
+        this.coreFocusRatio = 0.7;
     }
 
     updateMarketData(newGas) {
         const gas = Number(newGas);
-        // EMA Calculation: Smooths out noise but reacts to trends
         if (this.gasEma === 0) this.gasEma = gas;
         else this.gasEma = (this.alpha * gas) + ((1 - this.alpha) * this.gasEma);
 
         const deviation = Math.abs(gas - this.gasEma);
         this.volatility = (deviation / this.gasEma) * 100;
 
-        // --- DYNAMIC MODE SWITCHING ---
         if (this.volatility > 10) {
-            this.mode = "WAR"; // High Volatility -> Max Speed & Core Focus
-            this.coreFocusRatio = 0.95; // Focus on liquid assets only
+            this.mode = "WAR"; 
+            this.coreFocusRatio = 0.95; 
         } else if (this.volatility < 3) {
-            this.mode = "ECO"; // Low Volatility -> Wide Search
-            this.coreFocusRatio = 0.40; // Scan the "Millions"
+            this.mode = "ECO"; 
+            this.coreFocusRatio = 0.40; 
         } else {
             this.mode = "CRUISE";
             this.coreFocusRatio = 0.70;
@@ -104,18 +244,14 @@ class HyperHeuristicEngine {
     }
 
     calculateOptimalBribe(profitEth, baseFee) {
-        // Logarithmic Bribe Curve
-        // Balances winning the war vs keeping the profit
         if (profitEth <= 0) return 0n;
         
-        let bribePercent = Math.log10(profitEth * 100) * 45; // Aggressive curve
+        let bribePercent = Math.log10(profitEth * 100) * 45; 
         
-        // Boundaries
         if (bribePercent < 5) bribePercent = 5;
         if (bribePercent > 98) bribePercent = 98;
         
-        // Mode Adjustments
-        if (this.mode === "WAR") bribePercent += 15; // Pay more in chaos
+        if (this.mode === "WAR") bribePercent += 15;
         if (bribePercent > 99) bribePercent = 99;
 
         return BigInt(Math.floor(bribePercent));
@@ -129,40 +265,54 @@ class HyperHeuristicEngine {
 // GLOBAL REGISTRY & STATE
 let GLOBAL_REGISTRY = [];
 const AI = new HyperHeuristicEngine();
-
-// --- ZERO-LATENCY CACHE ---
-// We cache balance and encoded data to avoid async calls in the hot loop
 let STATE = {
     balanceEth: 0.0,
-    encodedCorePayloads: {}, // Map<TokenAddr, Bytes>
+    encodedCorePayloads: {}, 
     currentEthPrice: 0,
     nonce: 0
 };
 
-// --- MASTER PROCESS ---
+// ===============================================================================
+// PART 4: MAIN LOGIC
+// ===============================================================================
+
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   🚀 APEX HYPER-HEURISTIC STRIKER | v34.1 ZERO-LATENCY ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║  🚀 APEX STRIKER v35.0 | MULTI-POOL ROBUST EDITION     ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
-    console.log(`${TXT.cyan}[SYSTEM] Initializing Predictive AI Engine...${TXT.reset}`);
+    console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Pool RPC Router...${TXT.reset}`);
     console.log(`${TXT.magenta}🎯 PROFIT TARGET LOCKED: ${CONFIG.BENEFICIARY}${TXT.reset}\n`);
 
     cluster.fork();
     cluster.on('exit', () => cluster.fork());
 } 
-// --- WORKER PROCESS ---
 else {
     initWorker();
 }
 
+/**
+ * Creates an Ethers.js compatible provider that routes requests through
+ * our MultiPoolRpcRouter.
+ */
+function createRobustProvider(router) {
+    // We initialize with a dummy URL because we override the send method anyway
+    const provider = new ethers.JsonRpcProvider("http://localhost:1234", CONFIG.CHAIN_ID, {
+        staticNetwork: true
+    });
+
+    // Override the internal send method to use our router
+    // Note: In Ethers v6, `send` is the public method for JSON-RPC
+    provider.send = async (method, params) => {
+        return await router.request({ method, params });
+    };
+
+    return provider;
+}
+
 async function initWorker() {
-    // 0. GLOBAL ERROR HANDLER (Prevents 429 Crashes)
     process.on('uncaughtException', (err) => {
-        if (err.message && (err.message.includes('429') || err.message.includes('Unexpected server response'))) {
-            // Suppress the log to keep console clean, or perform quiet retry logic here
-            return;
-        }
+        if (err.message && (err.message.includes('429') || err.message.includes('Unexpected server response'))) return;
         console.error('Uncaught Exception:', err);
         process.exit(1);
     });
@@ -179,7 +329,18 @@ async function initWorker() {
     const cleanKey = rawKey.trim();
 
     try {
-        // 2. LOAD ASSETS
+        // 2. SETUP MULTI-POOL ROUTER
+        const pools = CONFIG.POOLS.map(p => new RpcPool(p));
+        const rpcRouter = new MultiPoolRpcRouter(pools);
+        
+        // Create the Robust Provider
+        // This provider will automatically cycle through endpoints on failure
+        const httpProvider = createRobustProvider(rpcRouter);
+        const signer = new ethers.Wallet(cleanKey, httpProvider);
+
+        console.log(`${TXT.cyan}🛡️  Robust RPC Router Active: ${pools.length} Pools Configured${TXT.reset}`);
+
+        // 3. LOAD ASSETS
         console.log(`${TXT.yellow}📥 Ingesting Asset Database...${TXT.reset}`);
         Object.values(CONFIG.CORE_ASSETS).forEach(addr => GLOBAL_REGISTRY.push(addr));
         
@@ -193,19 +354,14 @@ async function initWorker() {
         GLOBAL_REGISTRY = [...new Set(GLOBAL_REGISTRY)];
         console.log(`${TXT.green}✅ REGISTRY LOADED: ${GLOBAL_REGISTRY.length.toLocaleString()} Assets.${TXT.reset}`);
 
-        // 3. PROVIDERS (Robust Connection Logic)
-        const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
-        
-        // Auto-Retry WSS Connection
+        // 4. WEBSOCKET CONNECTION (Separate from RPC Router)
+        // WS is used for events, RPC Router for execution/queries
         let wsProvider;
         const connectWss = async () => {
             while(true) {
                 try {
                     const provider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
-                    
-                    // Attach error handler immediately
-                    provider.websocket.on('error', (e) => { /* Ignore, wait for reconnect */ });
-                    
+                    provider.websocket.on('error', (e) => { /* Ignore */ });
                     await new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
                         provider.websocket.once('open', () => {
@@ -214,7 +370,6 @@ async function initWorker() {
                         });
                         provider.websocket.once('close', () => reject(new Error("Closed")));
                     });
-                    
                     return provider;
                 } catch (e) {
                     console.log(`${TXT.yellow}⚠️ WSS Busy (429). Retrying in 2s...${TXT.reset}`);
@@ -224,31 +379,28 @@ async function initWorker() {
         };
         
         wsProvider = await connectWss();
-        const signer = new ethers.Wallet(cleanKey, httpProvider);
 
         // Contracts
         const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
         const oracleContract = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes) view returns (uint256)"], httpProvider);
         const priceFeed = new ethers.Contract(CONFIG.CHAINLINK_FEED, ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"], httpProvider);
 
-        // 4. FACTORY SNIFFER (Infinite Learning)
+        // Factory Sniffer
         const factory = new ethers.Contract(CONFIG.FACTORIES.UNISWAP_V3, ["event PoolCreated(address indexed, address indexed, uint24, int24, address)"], wsProvider);
         factory.on("PoolCreated", (t0, t1) => { GLOBAL_REGISTRY.push(t0); GLOBAL_REGISTRY.push(t1); });
 
-        // Initial State Sync
+        // Initial State
         STATE.nonce = await httpProvider.getTransactionCount(signer.address);
         const bal = await httpProvider.getBalance(signer.address);
         STATE.balanceEth = parseFloat(ethers.formatEther(bal));
         
-        // 5. BACKGROUND OPTIMIZER LOOP (Every 3s)
-        // This removes heavy logic from the hot path
+        // 5. BACKGROUND OPTIMIZER LOOP
         setInterval(async () => {
             try {
-                // Update Balance
+                // Uses httpProvider -> routes via MultiPoolRpcRouter
                 const bal = await httpProvider.getBalance(signer.address);
                 STATE.balanceEth = parseFloat(ethers.formatEther(bal));
 
-                // Pre-Encode Payloads for Core Assets to save CPU later
                 const loanAmt = STATE.balanceEth > 0.1 ? ethers.parseEther("50") : ethers.parseEther("10");
                 for (const [sym, addr] of Object.entries(CONFIG.CORE_ASSETS)) {
                     if (sym === "WETH") continue;
@@ -259,7 +411,7 @@ async function initWorker() {
             } catch (e) {}
         }, 3000);
 
-        // 6. AI SENSOR LOOP (Every Block)
+        // 6. AI SENSOR LOOP
         wsProvider.on("block", async () => {
             try {
                 const feeData = await httpProvider.getFeeData();
@@ -269,7 +421,7 @@ async function initWorker() {
             } catch (e) {}
         });
 
-        // 7. THE HOT LOOP (Zero-Latency Scanning)
+        // 7. THE HOT LOOP
         let scanCount = 0;
         wsProvider.on("pending", async (txHash) => {
             scanCount++;
@@ -280,17 +432,14 @@ async function initWorker() {
                 const useCore = AI.shouldScanCore();
 
                 if (useCore) {
-                    // FAST PATH: Use Pre-Computed Payload
                     const coreKeys = Object.keys(CONFIG.CORE_ASSETS);
                     const key = coreKeys[Math.floor(Math.random() * coreKeys.length)];
                     targetAsset = CONFIG.CORE_ASSETS[key];
                     if (targetAsset === CONFIG.CORE_ASSETS.WETH) return;
                     payload = STATE.encodedCorePayloads[targetAsset];
                 } else {
-                    // SLOW PATH: Random Asset (Compute on fly)
                     targetAsset = GLOBAL_REGISTRY[Math.floor(Math.random() * GLOBAL_REGISTRY.length)];
                     if (!targetAsset) return;
-                    // Standard Conservative Loan for unknown assets
                     const safeLoan = ethers.parseEther("10"); 
                     payload = titanIface.encodeFunctionData("requestTitanLoan", [
                         CONFIG.CORE_ASSETS.WETH, safeLoan, [CONFIG.CORE_ASSETS.WETH, targetAsset]
@@ -305,7 +454,7 @@ async function initWorker() {
 
         wsProvider.websocket.onclose = () => {
             console.log(`${TXT.yellow}WSS Closed. Reconnecting...${TXT.reset}`);
-            process.exit(1); // Cluster will restart worker
+            process.exit(1); 
         };
 
     } catch (e) {
@@ -316,8 +465,8 @@ async function initWorker() {
 
 async function executeHeuristicStrike(provider, signer, oracle, data, targetToken) {
     try {
-        // A. AGGRESSIVE PRE-FLIGHT (Parallel Exec)
-        // We run Sim, L1 Fee, and Gas Data fetch concurrently
+        // A. AGGRESSIVE PRE-FLIGHT (Multi-Pool Protected)
+        // All these calls utilize the MultiPoolRpcRouter implicitly via 'provider'
         const [simulation, l1Fee, feeData] = await Promise.all([
             provider.call({ to: CONFIG.TARGET_CONTRACT, data, from: signer.address }).catch(() => null),
             oracle.getL1Fee(data).catch(() => 0n),
@@ -350,7 +499,7 @@ async function executeHeuristicStrike(provider, signer, oracle, data, targetToke
                 gasLimit: CONFIG.GAS_LIMIT,
                 maxFeePerGas: feeData.maxFeePerGas,
                 maxPriorityFeePerGas: priorityFee,
-                nonce: STATE.nonce++, // Optimistic Nonce Increment
+                nonce: STATE.nonce++, 
                 type: 2, chainId: CONFIG.CHAIN_ID
             };
 
@@ -367,7 +516,6 @@ async function executeHeuristicStrike(provider, signer, oracle, data, targetToke
             }
         }
     } catch (e) {
-        // Optimistic nonce correction
         STATE.nonce = await provider.getTransactionCount(signer.address); 
     }
 }
