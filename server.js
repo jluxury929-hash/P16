@@ -175,8 +175,13 @@ const CONFIG = {
         }
     ],
 
-    // WebSocket still requires a direct connection for subscriptions
-    WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
+    // WebSocket Failover List
+    WSS_ENDPOINTS: [
+        process.env.WSS_URL,
+        "wss://base-rpc.publicnode.com",
+        "wss://base.llamarpc.com",
+        "wss://mainnet.base.org"
+    ].filter(Boolean),
     
     PORT: process.env.PORT || 8080,
     PRIVATE_RELAY: "https://base.merkle.io",
@@ -354,26 +359,35 @@ async function initWorker() {
         GLOBAL_REGISTRY = [...new Set(GLOBAL_REGISTRY)];
         console.log(`${TXT.green}✅ REGISTRY LOADED: ${GLOBAL_REGISTRY.length.toLocaleString()} Assets.${TXT.reset}`);
 
-        // 4. WEBSOCKET CONNECTION (Separate from RPC Router)
-        // WS is used for events, RPC Router for execution/queries
+        // 4. WEBSOCKET CONNECTION (Rotational Failover)
         let wsProvider;
+        let wssIndex = 0;
         const connectWss = async () => {
             while(true) {
+                const url = CONFIG.WSS_ENDPOINTS[wssIndex];
                 try {
-                    const provider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
-                    provider.websocket.on('error', (e) => { /* Ignore */ });
+                    console.log(`${TXT.dim}🔌 Connecting to WSS: ${url}...${TXT.reset}`);
+                    const provider = new ethers.WebSocketProvider(url);
+                    
+                    // Prevent crash on immediate error, handled in await block
+                    provider.websocket.onerror = () => {}; 
+
                     await new Promise((resolve, reject) => {
-                        const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
-                        provider.websocket.once('open', () => {
+                        const timeout = setTimeout(() => reject(new Error("Timeout")), 8000);
+                        provider.websocket.onopen = () => {
                             clearTimeout(timeout);
                             resolve();
-                        });
-                        provider.websocket.once('close', () => reject(new Error("Closed")));
+                        };
+                        provider.websocket.onclose = () => reject(new Error("Closed"));
                     });
+                    
+                    console.log(`${TXT.green}⚡ WSS Connected: ${url}${TXT.reset}`);
                     return provider;
+
                 } catch (e) {
-                    console.log(`${TXT.yellow}⚠️ WSS Busy (429). Retrying in 2s...${TXT.reset}`);
-                    await new Promise(r => setTimeout(r, 2000));
+                    console.log(`${TXT.yellow}⚠️ WSS Failed (${url}). Switching...${TXT.reset}`);
+                    wssIndex = (wssIndex + 1) % CONFIG.WSS_ENDPOINTS.length;
+                    await new Promise(r => setTimeout(r, 1000));
                 }
             }
         };
