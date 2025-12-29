@@ -18,10 +18,9 @@ const SnakeGame = () => {
   const [gameStarted, setGameStarted] = useState(false);
 
   // Refs for mutable state needed inside the interval without re-triggering it
-  // This "fixes" the stale closure problem common in React hooks game loops.
   const snakeRef = useRef(snake);
   const directionRef = useRef(direction);
-  const lastProcessedDirectionRef = useRef(direction); // Fixes the "rapid reverse" bug
+  const lastProcessedDirectionRef = useRef(direction);
   const gameOverRef = useRef(gameOver);
   const isPausedRef = useRef(isPaused);
   const scoreRef = useRef(score);
@@ -33,26 +32,51 @@ const SnakeGame = () => {
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
   useEffect(() => { scoreRef.current = score; }, [score]);
 
-  // Initialize High Score from local storage if available
+  // Initialize High Score
   useEffect(() => {
-    const saved = localStorage.getItem('snakeHighScore');
-    if (saved) setHighScore(parseInt(saved, 10));
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('snakeHighScore');
+      if (saved) setHighScore(parseInt(saved, 10));
+    }
   }, []);
 
   const generateFood = useCallback(() => {
-    // Generate food that isn't on the snake
     let newFood;
     let isOnSnake = true;
-    while (isOnSnake) {
+    let attempts = 0;
+    
+    // Safety break: prevent infinite loop if board is full or random fails
+    while (isOnSnake && attempts < 50) {
       newFood = {
         x: Math.floor(Math.random() * GRID_SIZE),
         y: Math.floor(Math.random() * GRID_SIZE)
       };
+      
+      // Check if new position is on any snake segment
       // eslint-disable-next-line no-loop-func
       isOnSnake = snakeRef.current.some(segment => segment.x === newFood.x && segment.y === newFood.y);
+      attempts++;
     }
+
+    // Fallback: If we couldn't find a spot in 50 tries, just place it at 0,0 (or handled safely next tick)
+    if (isOnSnake) {
+       newFood = { x: 0, y: 0 }; 
+    }
+    
     setFood(newFood);
   }, []);
+
+  const handleGameOver = useCallback(() => {
+    setGameOver(true);
+    setIsPaused(true);
+    // Use ref for current score to ensure fresh value
+    if (scoreRef.current > highScore) {
+      setHighScore(scoreRef.current);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('snakeHighScore', scoreRef.current.toString());
+      }
+    }
+  }, [highScore]);
 
   const resetGame = () => {
     const initialSnake = [{ x: 10, y: 10 }];
@@ -65,7 +89,7 @@ const SnakeGame = () => {
     setIsPaused(false);
     setGameStarted(true);
     
-    // Reset Refs
+    // Reset Refs immediately to prevent race conditions in loop
     snakeRef.current = initialSnake;
     directionRef.current = initialDir;
     lastProcessedDirectionRef.current = initialDir;
@@ -76,21 +100,15 @@ const SnakeGame = () => {
     generateFood();
   };
 
-  const handleGameOver = () => {
-    setGameOver(true);
-    setIsPaused(true);
-    if (scoreRef.current > highScore) {
-      setHighScore(scoreRef.current);
-      localStorage.setItem('snakeHighScore', scoreRef.current.toString());
-    }
-  };
-
   const gameLoop = useCallback(() => {
+    // Check refs directly to stop execution if paused/over
     if (isPausedRef.current || gameOverRef.current) return;
 
     const currentHead = snakeRef.current[0];
     const currentDir = directionRef.current;
     
+    if (!currentHead) return; // Safety check
+
     // Calculate new head position
     const newHead = {
       x: currentHead.x + currentDir.x,
@@ -109,8 +127,6 @@ const SnakeGame = () => {
     }
 
     // 2. Check Self Collision
-    // We check against all segments except the very last one (which will move away unless we grew)
-    // But to be safe and robust, we check all current segments.
     if (snakeRef.current.some(segment => segment.x === newHead.x && segment.y === newHead.y)) {
       handleGameOver();
       return;
@@ -122,24 +138,21 @@ const SnakeGame = () => {
     if (newHead.x === food.x && newHead.y === food.y) {
       setScore(s => s + 1);
       generateFood();
-      // Don't pop the tail, so we grow
     } else {
       newSnake.pop(); // Remove tail
     }
 
     setSnake(newSnake);
     
-    // Update the "last processed" direction to prevent double-turn suicide
     lastProcessedDirectionRef.current = currentDir;
-  }, [food, generateFood]);
+  }, [food, generateFood, handleGameOver]);
 
   // The Game Interval
   useEffect(() => {
-    // Dynamic speed based on score
     const speed = Math.max(MIN_SPEED, INITIAL_SPEED - (score * 2));
     const intervalId = setInterval(gameLoop, speed);
     return () => clearInterval(intervalId);
-  }, [gameLoop, score]); // Re-create interval when speed changes (score changes)
+  }, [gameLoop, score]);
 
   // Input Handling
   const changeDirection = useCallback((newDir) => {
@@ -153,12 +166,11 @@ const SnakeGame = () => {
     
     if (!isOpposite) {
       setDirection(newDir);
-      directionRef.current = newDir; // Update ref immediately for rapid inputs
+      directionRef.current = newDir;
     }
   }, []);
 
   const handleKeyDown = useCallback((e) => {
-    // Prevent default scrolling for arrow keys
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
       e.preventDefault();
     }
@@ -170,17 +182,19 @@ const SnakeGame = () => {
       case 'ArrowRight': changeDirection({ x: 1, y: 0 }); break;
       case ' ': 
       case 'Enter':
-        if (gameOver) resetGame();
+        if (gameOverRef.current) resetGame();
         else if (!gameStarted) resetGame();
         else setIsPaused(p => !p);
         break;
       default: break;
     }
-  }, [changeDirection, gameOver, gameStarted]);
+  }, [changeDirection, gameStarted, changeDirection]); // Added correct deps
 
   useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }
   }, [handleKeyDown]);
 
   // Render Helpers
@@ -213,7 +227,7 @@ const SnakeGame = () => {
         <div className="p-4">
           <div className="relative w-full aspect-square bg-slate-900 rounded-lg border-2 border-slate-700 shadow-inner overflow-hidden">
             
-            {/* Grid Background (Optional subtle pattern) */}
+            {/* Grid Background */}
             <div className="absolute inset-0 opacity-10" 
                  style={{ 
                    backgroundImage: 'radial-gradient(circle, #475569 1px, transparent 1px)', 
@@ -295,7 +309,6 @@ const SnakeGame = () => {
 
         {/* Controls Area */}
         <div className="bg-slate-800 p-6 border-t border-slate-700">
-          {/* Desktop Hint */}
           <div className="hidden md:flex justify-center text-xs text-slate-500 space-x-6 mb-2">
             <span className="flex items-center"><span className="border border-slate-600 px-1 rounded mr-1">Space</span> to Pause</span>
             <span className="flex items-center"><span className="border border-slate-600 px-1 rounded mr-1">Arrows</span> to Move</span>
