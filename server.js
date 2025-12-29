@@ -1,5 +1,5 @@
 // ===============================================================================
-// APEX HYPER-HEURISTIC STRIKER v34.0 - ZERO-LATENCY AI CLUSTER
+// APEX HYPER-HEURISTIC STRIKER v34.1 - ROBUST CONNECTIVITY PATCH
 // ===============================================================================
 
 const cluster = require('cluster');
@@ -143,7 +143,7 @@ let STATE = {
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   🚀 APEX HYPER-HEURISTIC STRIKER | v34.0 ZERO-LATENCY ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   🚀 APEX HYPER-HEURISTIC STRIKER | v34.1 ZERO-LATENCY ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     console.log(`${TXT.cyan}[SYSTEM] Initializing Predictive AI Engine...${TXT.reset}`);
     console.log(`${TXT.magenta}🎯 PROFIT TARGET LOCKED: ${CONFIG.BENEFICIARY}${TXT.reset}\n`);
@@ -157,6 +157,16 @@ else {
 }
 
 async function initWorker() {
+    // 0. GLOBAL ERROR HANDLER (Prevents 429 Crashes)
+    process.on('uncaughtException', (err) => {
+        if (err.message && (err.message.includes('429') || err.message.includes('Unexpected server response'))) {
+            // Suppress the log to keep console clean, or perform quiet retry logic here
+            return;
+        }
+        console.error('Uncaught Exception:', err);
+        process.exit(1);
+    });
+
     // 1. HTTP HEALTH SERVER
     const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -183,12 +193,38 @@ async function initWorker() {
         GLOBAL_REGISTRY = [...new Set(GLOBAL_REGISTRY)];
         console.log(`${TXT.green}✅ REGISTRY LOADED: ${GLOBAL_REGISTRY.length.toLocaleString()} Assets.${TXT.reset}`);
 
-        // 3. PROVIDERS
+        // 3. PROVIDERS (Robust Connection Logic)
         const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
-        const wsProvider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
+        
+        // Auto-Retry WSS Connection
+        let wsProvider;
+        const connectWss = async () => {
+            while(true) {
+                try {
+                    const provider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
+                    
+                    // Attach error handler immediately
+                    provider.websocket.on('error', (e) => { /* Ignore, wait for reconnect */ });
+                    
+                    await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => reject(new Error("Timeout")), 5000);
+                        provider.websocket.once('open', () => {
+                            clearTimeout(timeout);
+                            resolve();
+                        });
+                        provider.websocket.once('close', () => reject(new Error("Closed")));
+                    });
+                    
+                    return provider;
+                } catch (e) {
+                    console.log(`${TXT.yellow}⚠️ WSS Busy (429). Retrying in 2s...${TXT.reset}`);
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
+        };
+        
+        wsProvider = await connectWss();
         const signer = new ethers.Wallet(cleanKey, httpProvider);
-
-        await new Promise((resolve) => wsProvider.once("block", resolve));
 
         // Contracts
         const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
@@ -267,7 +303,10 @@ async function initWorker() {
             }
         });
 
-        wsProvider.websocket.onclose = () => process.exit(1);
+        wsProvider.websocket.onclose = () => {
+            console.log(`${TXT.yellow}WSS Closed. Reconnecting...${TXT.reset}`);
+            process.exit(1); // Cluster will restart worker
+        };
 
     } catch (e) {
         console.error(`\n${TXT.red}❌ ERROR: ${e.message}${TXT.reset}`);
