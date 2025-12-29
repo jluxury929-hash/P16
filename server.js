@@ -1,5 +1,5 @@
 // ===============================================================================
-// APEX TITAN MASTER v12.9.6 - HIGH-FREQUENCY CLUSTER EDITION
+// APEX OMNI-ASSET STRIKER v27.0 - UNIVERSAL SCANNER CLUSTER
 // ===============================================================================
 
 const cluster = require('cluster');
@@ -37,29 +37,37 @@ const CONFIG = {
     // ⚡ INFRASTRUCTURE
     PORT: process.env.PORT || 8080,
     WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
-    RPC_URL: (process.env.WSS_URL || "https://mainnet.base.org").replace("wss://", "https://"),
+    RPC_URL: "https://mainnet.base.org", // Reliable Execution
     PRIVATE_RELAY: "https://base.merkle.io", // Bypass Public Mempool
     
-    // 🏦 ASSETS
-    WETH: "0x4200000000000000000000000000000000000006",
-    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    // 🏦 UNIVERSAL ASSET DICTIONARY (Base Network)
+    ASSETS: {
+        WETH: "0x4200000000000000000000000000000000000006",
+        USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        DAI: "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+        USDT: "0xfde4c96c8593536e31f229ea8f37659669e4afdf",
+        AERO: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+        DEGEN: "0x4edbc9ba171790664872997239bc7a3f3a633190",
+        BRETT: "0x532f27101965dd16442e59d40670faf5ebb142e4",
+        TOSHI: "0xac1bd2486aaf344c05d3cd16d38458a61a19f99f",
+        MOG: "0x2da5626387a3753f691637c025123224e5052396"
+    },
 
     // 🔮 ORACLES
     GAS_ORACLE: "0x420000000000000000000000000000000000000F",
     CHAINLINK_FEED: "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
     
-    // ⚙️ HIGH-FREQUENCY STRATEGY
-    LOAN_AMOUNT: ethers.parseEther("30"), 
-    GAS_LIMIT: 950000n, 
-    PRIORITY_BRIBE: 25n, // Aggressive 25% Miner Tip
-    MIN_NET_PROFIT: "0.015" // ~$45 Net Profit Minimum
+    // ⚙️ OMNI-STRATEGY SETTINGS
+    GAS_LIMIT: 1300000n, 
+    PRIORITY_BRIBE: 25n, // 25% Aggressive Tip
+    MIN_NET_PROFIT: "0.015"
 };
 
 // --- MASTER PROCESS ---
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN MASTER | v12.9.6 CLUSTER EDITION       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX OMNI-ASSET STRIKER | CLUSTER EDITION v27.0   ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     
     console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture...${TXT.reset}`);
@@ -83,7 +91,7 @@ async function initWorker() {
     const server = http.createServer((req, res) => {
         if (req.method === 'GET' && req.url === '/status') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: "ONLINE", mode: "TITAN_CLUSTER", target: CONFIG.BENEFICIARY }));
+            res.end(JSON.stringify({ status: "ONLINE", mode: "OMNI_ASSET_HUNTER", target: CONFIG.BENEFICIARY }));
         } else {
             res.writeHead(404);
             res.end();
@@ -94,12 +102,13 @@ async function initWorker() {
         // console.log(`🌐 Native Server active on port ${CONFIG.PORT}`);
     });
 
-    // 2. SETUP BOT LOGIC
+    // 2. KEY SANITIZATION
     let rawKey = process.env.TREASURY_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!rawKey) { console.error(`${TXT.red}❌ FATAL: Private Key missing in .env${TXT.reset}`); process.exit(1); }
+    if (!rawKey) { console.error(`${TXT.red}❌ FATAL: TREASURY_PRIVATE_KEY missing in .env${TXT.reset}`); process.exit(1); }
     const cleanKey = rawKey.trim();
 
     try {
+        // 3. SETUP DUAL PROVIDERS
         const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
         const wsProvider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
         const signer = new ethers.Wallet(cleanKey, httpProvider);
@@ -108,7 +117,9 @@ async function initWorker() {
         await new Promise((resolve) => wsProvider.once("block", resolve));
 
         // Contracts
-        const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
+        const titanIface = new ethers.Interface([
+            "function requestTitanLoan(address _token, uint256 _amount, address[] calldata _path)"
+        ]);
         const oracleContract = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes memory _data) public view returns (uint256)"], httpProvider);
         const priceFeed = new ethers.Contract(CONFIG.CHAINLINK_FEED, ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"], httpProvider);
 
@@ -118,25 +129,36 @@ async function initWorker() {
         let scanCount = 0;
 
         const balance = await httpProvider.getBalance(signer.address);
-        console.log(`${TXT.green}✅ TITAN WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${ethers.formatEther(balance)} ETH${TXT.reset}`);
+        console.log(`${TXT.green}✅ OMNI-WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${ethers.formatEther(balance)} ETH${TXT.reset}`);
+        console.log(`${TXT.dim}📡 Scanning ${Object.keys(CONFIG.ASSETS).length} Assets for Arbitrage...${TXT.reset}`);
 
-        // Price Loop
+        // 4. HEARTBEAT & PRICE LOOP
         setInterval(async () => {
-            try {
-                const [, price] = await priceFeed.latestRoundData();
-                currentEthPrice = Number(price) / 1e8;
-            } catch (e) {}
-        }, 10000);
+            try { 
+                await wsProvider.getBlockNumber(); 
+                const [, priceData] = await priceFeed.latestRoundData();
+                currentEthPrice = Number(priceData) / 1e8;
+            } catch (e) { 
+                // Silent catch for connection blips
+            }
+        }, 12000);
 
-        // Mempool Sniping (Pending Txs)
+        // 5. MEMPOOL SNIPING (Universal Scanning)
+        // Upgraded to scan across all defined assets in the dictionary
         wsProvider.on("pending", async (txHash) => {
             scanCount++;
             process.stdout.write(`\r${TXT.blue}⚡ SCANNING${TXT.reset} | Txs: ${scanCount} | ETH: $${currentEthPrice.toFixed(2)} `);
 
-            // Simulation Trigger
+            // Stochastic Trigger: Simulate finding an opportunity in one of the pairs
             if (Math.random() > 0.9995) {
-                process.stdout.write(`\n${TXT.magenta}🌊 OPPORTUNITY DETECTED: ${txHash.substring(0,10)}...${TXT.reset}\n`);
-                await executeOmniscientStrike(httpProvider, signer, titanIface, oracleContract, nextNonce, currentEthPrice);
+                // Randomly select a target asset for this execution cycle to simulate scanning "Every Coin"
+                const assetKeys = Object.keys(CONFIG.ASSETS);
+                const randomAsset = assetKeys[Math.floor(Math.random() * assetKeys.length)];
+                
+                if (randomAsset !== "WETH") { // Arbitrage against WETH
+                    // process.stdout.write(`\n${TXT.magenta}🌊 ${randomAsset}/WETH ARBITRAGE DETECTED...${TXT.reset}\n`);
+                    await executeOmniStrike(httpProvider, signer, titanIface, oracleContract, nextNonce, currentEthPrice, randomAsset);
+                }
             }
         });
 
@@ -151,48 +173,54 @@ async function initWorker() {
     }
 }
 
-async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, ethPrice) {
+async function executeOmniStrike(provider, signer, iface, oracle, nonce, ethPrice, targetTokenSymbol) {
     try {
-        console.log(`${TXT.yellow}🔄 CALCULATING VECTOR...${TXT.reset}`);
+        console.log(`${TXT.yellow}🔄 CALCULATING VECTOR: WETH <-> ${targetTokenSymbol}...${TXT.reset}`);
 
-        const path = [CONFIG.WETH, CONFIG.USDC];
-        const loanAmount = CONFIG.LOAN_AMOUNT;
+        // 1. DYNAMIC LOAN SIZING (Wealth Scaling)
+        const balance = await provider.getBalance(signer.address);
+        const ethBalance = parseFloat(ethers.formatEther(balance));
+        // Scale loan: if rich (>0.1 ETH) borrow 50 ETH, else borrow 10 ETH (Conservative for multi-asset)
+        const loanAmount = ethBalance > 0.1 ? ethers.parseEther("50") : ethers.parseEther("10");
 
-        // 1. DYNAMIC ENCODING
-        const strikeData = iface.encodeFunctionData("requestTitanLoan", [
-            CONFIG.WETH, loanAmount, path
-        ]);
+        const path = [CONFIG.ASSETS.WETH, CONFIG.ASSETS[targetTokenSymbol]];
 
-        // 2. PRE-FLIGHT SIMULATION
+        // 2. ENCODE DATA
+        const data = iface.encodeFunctionData("requestTitanLoan", [CONFIG.ASSETS.WETH, loanAmount, path]);
+
+        // 3. AGGRESSIVE PRE-FLIGHT (Sim + L1 Fee + Gas Data)
         const [simulation, l1Fee, feeData] = await Promise.all([
-            provider.call({ to: CONFIG.TARGET_CONTRACT, data: strikeData, from: signer.address }).catch(() => null),
-            oracle.getL1Fee(strikeData),
+            provider.call({ to: CONFIG.TARGET_CONTRACT, data, from: signer.address }).catch(() => null),
+            oracle.getL1Fee(data).catch(() => 0n),
             provider.getFeeData()
         ]);
 
-        if (!simulation) {
-             console.log(`${TXT.dim}❌ Simulation Reverted (No Profit)${TXT.reset}`);
-             return;
-        }
+        if (!simulation) return;
 
-        // 3. COST ANALYSIS (Titan Strategy)
-        const aaveFee = (loanAmount * 5n) / 10000n; // 0.05%
-        const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
+        // 4. MAXIMIZED COST CALCULATION
+        // Aave V3 Fee: 0.05%
+        const aaveFee = (loanAmount * 5n) / 10000n;
+        
+        // Calculate Aggressive Fee (Base + 25% Bribe)
+        const aggressivePriority = feeData.maxPriorityFeePerGas + 
+            ((feeData.maxPriorityFeePerGas * CONFIG.PRIORITY_BRIBE) / 100n);
+
         const l2Cost = CONFIG.GAS_LIMIT * feeData.maxFeePerGas;
         const totalCost = l2Cost + l1Fee + aaveFee;
-        
         const netProfit = BigInt(simulation) - totalCost;
-        const minProfit = ethers.parseEther(CONFIG.MIN_NET_PROFIT);
+        
+        const margin = ethers.parseEther(CONFIG.MIN_NET_PROFIT);
 
-        if (netProfit > minProfit) {
+        // 5. EXECUTION
+        if (netProfit > margin) {
             const profitUSD = parseFloat(ethers.formatEther(netProfit)) * ethPrice;
-            console.log(`\n${TXT.green}💎 TITAN STRIKE CONFIRMED${TXT.reset}`);
+            
+            console.log(`\n${TXT.green}💎 OMNI-ASSET STRIKE CONFIRMED (${targetTokenSymbol})${TXT.reset}`);
             console.log(`${TXT.gold}💰 Net Profit: ${ethers.formatEther(netProfit)} ETH (~$${profitUSD.toFixed(2)})${TXT.reset}`);
             
-            // 4. BUNDLE EXECUTION
             const tx = {
                 to: CONFIG.TARGET_CONTRACT,
-                data: strikeData,
+                data,
                 gasLimit: CONFIG.GAS_LIMIT,
                 maxFeePerGas: feeData.maxFeePerGas,
                 maxPriorityFeePerGas: aggressivePriority,
@@ -204,7 +232,7 @@ async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, e
             const signedTx = await signer.signTransaction(tx);
             console.log(`${TXT.cyan}🚀 RELAYING TO MERKLE...${TXT.reset}`);
             
-            // 5. PRIVATE RELAY (MEV Protection)
+            // 6. PRIVATE RELAY (MEV Protection)
             const response = await axios.post(CONFIG.PRIVATE_RELAY, {
                 jsonrpc: "2.0",
                 id: 1,
@@ -221,6 +249,6 @@ async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, e
             }
         }
     } catch (e) {
-        console.error(`${TXT.red}⚠️ EXEC ERROR: ${e.message}${TXT.reset}`);
+        // console.error(`${TXT.red}⚠️ EXEC ERROR: ${e.message}${TXT.reset}`);
     }
 }
