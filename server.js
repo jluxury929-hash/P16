@@ -1,12 +1,12 @@
 /**
- * ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.1 (Self-Healing Connection)
+ * ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.2 (Heartbeat Patch)
  * * MERGED ARCHITECTURE:
  * 1. Omni-Channel Connectivity: Multi-Pool RPC Router + WSS Failover (from Apex v35).
  * 2. Neural Core: Predictive Gas, RL Bribing, and Heatmap Scoring (from Apex v35).
  * 3. Titan Execution: Flash Loan Logic (from Omniscient v6).
- * * v36.1 Patch:
- * - Removed process.exit(1) on WSS close to prevent reboot loops.
- * - Added persistent internal reconnection logic for Mempool Scanner.
+ * * v36.2 Patch:
+ * - Added WebSocket Heartbeat (Keep-Alive) to prevent idle timeouts.
+ * - Optimized reconnection delays to avoid rate-limit bans.
  */
 
 const cluster = require('cluster');
@@ -299,7 +299,7 @@ let STATE = {
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.1   ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.2   ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     
     console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture & AI...${TXT.reset}`);
@@ -379,10 +379,11 @@ async function startTitanWorker() {
         console.log(`${TXT.green}✅ TITAN WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${STATE.balanceEth.toFixed(4)} ETH${TXT.reset}`);
 
         // ==================================================================
-        // C. SELF-HEALING WEBSOCKET LOGIC (REPLACES OLD CONNECT LOOP)
+        // C. SELF-HEALING WEBSOCKET LOGIC (WITH HEARTBEAT PATCH)
         // ==================================================================
         let wssIndex = 0;
         let wsProvider;
+        let keepAliveInterval; // New Heartbeat Timer
 
         const establishMempoolConnection = async () => {
             while (true) {
@@ -390,16 +391,28 @@ async function startTitanWorker() {
                 try {
                     console.log(`${TXT.dim}🔌 Connecting to WSS: ${url}...${TXT.reset}`);
                     
+                    if (keepAliveInterval) clearInterval(keepAliveInterval); // Clear old timer
+
                     // Force a new provider
                     wsProvider = new WebSocketProvider(url);
                     
-                    // Silent Error Handler (prevents immediate crash)
+                    // Silent Error Handler
                     wsProvider.websocket.onerror = () => {}; 
 
                     // Connection Handshake
                     await new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => reject(new Error("Timeout")), 8000);
-                        wsProvider.websocket.onopen = () => { clearTimeout(timeout); resolve(); };
+                        wsProvider.websocket.onopen = () => { 
+                            clearTimeout(timeout); 
+                            
+                            // --- HEARTBEAT INIT ---
+                            // Send a ping every 15s to keep the connection alive
+                            keepAliveInterval = setInterval(() => {
+                                wsProvider.send("eth_blockNumber", []).catch(() => {});
+                            }, 15000);
+
+                            resolve(); 
+                        };
                         wsProvider.websocket.onclose = () => reject(new Error("Closed Immediately"));
                     });
 
@@ -443,17 +456,17 @@ async function startTitanWorker() {
                     });
 
                     // 4. IMMORTALITY PROTOCOL (Recursive Reconnect)
-                    // If this specific connection dies, we trigger the loop again cleanly
                     wsProvider.websocket.onclose = async () => {
+                        if (keepAliveInterval) clearInterval(keepAliveInterval); // Kill heartbeat
                         console.warn(`\n${TXT.yellow}⚠️ WSS Disconnected. Re-routing...${TXT.reset}`);
                         wssIndex = (wssIndex + 1) % CONFIG.WSS_ENDPOINTS.length;
-                        setTimeout(establishMempoolConnection, 1000); // Recursive call after delay
+                        setTimeout(establishMempoolConnection, 2000); // 2s Backoff
                     };
 
-                    // Break the connection loop if successful
                     break; 
 
                 } catch (e) {
+                    if (keepAliveInterval) clearInterval(keepAliveInterval);
                     console.log(`${TXT.yellow}⚠️ WSS Failed. Switching...${TXT.reset}`);
                     wssIndex = (wssIndex + 1) % CONFIG.WSS_ENDPOINTS.length;
                     await new Promise(r => setTimeout(r, 1000));
