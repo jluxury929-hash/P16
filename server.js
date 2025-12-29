@@ -1,12 +1,12 @@
 /**
- * ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.2 (Heartbeat Patch)
+ * ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.3 (Hybrid Scanner Patch)
  * * MERGED ARCHITECTURE:
  * 1. Omni-Channel Connectivity: Multi-Pool RPC Router + WSS Failover (from Apex v35).
  * 2. Neural Core: Predictive Gas, RL Bribing, and Heatmap Scoring (from Apex v35).
  * 3. Titan Execution: Flash Loan Logic (from Omniscient v6).
- * * v36.2 Patch:
- * - Added WebSocket Heartbeat (Keep-Alive) to prevent idle timeouts.
- * - Optimized reconnection delays to avoid rate-limit bans.
+ * * v36.3 Patch:
+ * - Added Hybrid Heartbeat: Logs updates on BLOCKS if Mempool is silent (Public Node fix).
+ * - Ensures visual activity even if the RPC provider restricts "pending" subscriptions.
  */
 
 const cluster = require('cluster');
@@ -299,7 +299,7 @@ let STATE = {
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.2   ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ ALCHEMY TITAN ENGINE | OMNISCIENT CLUSTER v36.3   ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     
     console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture & AI...${TXT.reset}`);
@@ -427,7 +427,7 @@ async function startTitanWorker() {
                         AI.heatToken(t0); AI.heatToken(t1); 
                     });
 
-                    // 2. AI Sensor (Blocks)
+                    // 2. AI Sensor (Blocks - NOW ALSO OUTPUTS LOGS)
                     wsProvider.on("block", async (blockNum) => {
                         try {
                             STATE.currentBlock = blockNum;
@@ -435,6 +435,9 @@ async function startTitanWorker() {
                             const [, priceData] = await priceFeed.latestRoundData();
                             AI.updateMarketData(feeData.maxFeePerGas, blockNum);
                             STATE.currentEthPrice = Number(priceData) / 1e8;
+                            
+                            // HYBRID LOG: Ensures visual activity even if mempool is silent
+                            process.stdout.write(`\r${TXT.cyan}📦 [BLOCK ${blockNum}]${TXT.reset} | Vol: ${AI.volatility.toFixed(1)} | ${TXT.dim}Mempool Silent...${TXT.reset} `);
                         } catch (e) {}
                     });
 
@@ -442,6 +445,7 @@ async function startTitanWorker() {
                     let scanCount = 0;
                     wsProvider.on("pending", async (txHash) => {
                         scanCount++;
+                        // Overwrite the Block Log with fast pending logs
                         process.stdout.write(`\r${TXT.blue}⚡ [${AI.mode}] SCANNING${TXT.reset} | Txs: ${scanCount} | Vol: ${AI.volatility.toFixed(1)} | RL: x${AI.bribeMultiplier.toFixed(2)} `);
                         
                         if (Math.random() > 0.9995) { 
