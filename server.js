@@ -1,363 +1,226 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, RotateCcw, Trophy, ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+// ===============================================================================
+// APEX TITAN MASTER v12.9.6 - HIGH-FREQUENCY CLUSTER EDITION
+// ===============================================================================
 
-// Constants
-const GRID_SIZE = 20;
-const INITIAL_SPEED = 150;
-const MIN_SPEED = 80;
+const cluster = require('cluster');
+const os = require('os');
+const http = require('http');
+const axios = require('axios'); // Required for Private Relay
+require('dotenv').config();
 
-const SnakeGame = () => {
-  // Game State
-  const [snake, setSnake] = useState([{ x: 10, y: 10 }]);
-  const [food, setFood] = useState({ x: 15, y: 10 });
-  const [direction, setDirection] = useState({ x: 1, y: 0 }); // Moving Right
-  const [score, setScore] = useState(0);
-  const [highScore, setHighScore] = useState(0);
-  const [gameOver, setGameOver] = useState(false);
-  const [isPaused, setIsPaused] = useState(true);
-  const [gameStarted, setGameStarted] = useState(false);
+// Check dependencies
+let ethers, WebSocket;
+try {
+    ethers = require('ethers');
+    WebSocket = require('ws');
+} catch (e) {
+    console.error("CRITICAL: Missing 'ethers' or 'ws' modules. Run 'npm install ethers ws axios'");
+    process.exit(1);
+}
 
-  // Refs for mutable state needed inside the interval without re-triggering it
-  const snakeRef = useRef(snake);
-  const directionRef = useRef(direction);
-  const lastProcessedDirectionRef = useRef(direction);
-  const gameOverRef = useRef(gameOver);
-  const isPausedRef = useRef(isPaused);
-  const scoreRef = useRef(score);
-  
-  // Sync refs with state
-  useEffect(() => { snakeRef.current = snake; }, [snake]);
-  useEffect(() => { directionRef.current = direction; }, [direction]);
-  useEffect(() => { gameOverRef.current = gameOver; }, [gameOver]);
-  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
-  useEffect(() => { scoreRef.current = score; }, [score]);
-
-  // Initialize High Score
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('snakeHighScore');
-      if (saved) setHighScore(parseInt(saved, 10));
-    }
-  }, []);
-
-  const generateFood = useCallback(() => {
-    let newFood;
-    let isOnSnake = true;
-    let attempts = 0;
-    
-    // Safety break: prevent infinite loop if board is full or random fails
-    while (isOnSnake && attempts < 50) {
-      newFood = {
-        x: Math.floor(Math.random() * GRID_SIZE),
-        y: Math.floor(Math.random() * GRID_SIZE)
-      };
-      
-      // Check if new position is on any snake segment
-      // eslint-disable-next-line no-loop-func
-      isOnSnake = snakeRef.current.some(segment => segment.x === newFood.x && segment.y === newFood.y);
-      attempts++;
-    }
-
-    // Fallback: If we couldn't find a spot in 50 tries, just place it at 0,0 (or handled safely next tick)
-    if (isOnSnake) {
-       newFood = { x: 0, y: 0 }; 
-    }
-    
-    setFood(newFood);
-  }, []);
-
-  const handleGameOver = useCallback(() => {
-    setGameOver(true);
-    setIsPaused(true);
-    // Use ref for current score to ensure fresh value
-    if (scoreRef.current > highScore) {
-      setHighScore(scoreRef.current);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('snakeHighScore', scoreRef.current.toString());
-      }
-    }
-  }, [highScore]);
-
-  const resetGame = () => {
-    const initialSnake = [{ x: 10, y: 10 }];
-    const initialDir = { x: 1, y: 0 };
-    
-    setSnake(initialSnake);
-    setDirection(initialDir);
-    setScore(0);
-    setGameOver(false);
-    setIsPaused(false);
-    setGameStarted(true);
-    
-    // Reset Refs immediately to prevent race conditions in loop
-    snakeRef.current = initialSnake;
-    directionRef.current = initialDir;
-    lastProcessedDirectionRef.current = initialDir;
-    gameOverRef.current = false;
-    isPausedRef.current = false;
-    scoreRef.current = 0;
-
-    generateFood();
-  };
-
-  const gameLoop = useCallback(() => {
-    // Check refs directly to stop execution if paused/over
-    if (isPausedRef.current || gameOverRef.current) return;
-
-    const currentHead = snakeRef.current[0];
-    const currentDir = directionRef.current;
-    
-    if (!currentHead) return; // Safety check
-
-    // Calculate new head position
-    const newHead = {
-      x: currentHead.x + currentDir.x,
-      y: currentHead.y + currentDir.y
-    };
-
-    // 1. Check Wall Collision
-    if (
-      newHead.x < 0 || 
-      newHead.x >= GRID_SIZE || 
-      newHead.y < 0 || 
-      newHead.y >= GRID_SIZE
-    ) {
-      handleGameOver();
-      return;
-    }
-
-    // 2. Check Self Collision
-    if (snakeRef.current.some(segment => segment.x === newHead.x && segment.y === newHead.y)) {
-      handleGameOver();
-      return;
-    }
-
-    const newSnake = [newHead, ...snakeRef.current];
-
-    // 3. Check Food Collision
-    if (newHead.x === food.x && newHead.y === food.y) {
-      setScore(s => s + 1);
-      generateFood();
-    } else {
-      newSnake.pop(); // Remove tail
-    }
-
-    setSnake(newSnake);
-    
-    lastProcessedDirectionRef.current = currentDir;
-  }, [food, generateFood, handleGameOver]);
-
-  // The Game Interval
-  useEffect(() => {
-    const speed = Math.max(MIN_SPEED, INITIAL_SPEED - (score * 2));
-    const intervalId = setInterval(gameLoop, speed);
-    return () => clearInterval(intervalId);
-  }, [gameLoop, score]);
-
-  // Input Handling
-  const changeDirection = useCallback((newDir) => {
-    if (isPausedRef.current || gameOverRef.current) return;
-
-    const lastDir = lastProcessedDirectionRef.current;
-
-    // Prevent reversing directly
-    const isOpposite = (newDir.x === -lastDir.x && newDir.y === 0) || 
-                       (newDir.y === -lastDir.y && newDir.x === 0);
-    
-    if (!isOpposite) {
-      setDirection(newDir);
-      directionRef.current = newDir;
-    }
-  }, []);
-
-  const handleKeyDown = useCallback((e) => {
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
-      e.preventDefault();
-    }
-
-    switch (e.key) {
-      case 'ArrowUp': changeDirection({ x: 0, y: -1 }); break;
-      case 'ArrowDown': changeDirection({ x: 0, y: 1 }); break;
-      case 'ArrowLeft': changeDirection({ x: -1, y: 0 }); break;
-      case 'ArrowRight': changeDirection({ x: 1, y: 0 }); break;
-      case ' ': 
-      case 'Enter':
-        if (gameOverRef.current) resetGame();
-        else if (!gameStarted) resetGame();
-        else setIsPaused(p => !p);
-        break;
-      default: break;
-    }
-  }, [changeDirection, gameStarted, changeDirection]); // Added correct deps
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.addEventListener('keydown', handleKeyDown);
-      return () => window.removeEventListener('keydown', handleKeyDown);
-    }
-  }, [handleKeyDown]);
-
-  // Render Helpers
-  const getSegmentStyle = (x, y, isHead) => {
-    const size = 100 / GRID_SIZE;
-    return {
-      left: `${x * size}%`,
-      top: `${y * size}%`,
-      width: `${size}%`,
-      height: `${size}%`,
-    };
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans text-slate-100">
-      <div className="w-full max-w-md bg-slate-800 rounded-xl shadow-2xl overflow-hidden border border-slate-700">
-        
-        {/* Header */}
-        <div className="bg-slate-950 p-4 flex justify-between items-center border-b border-slate-800">
-          <div className="flex items-center space-x-2">
-            <Trophy className="w-5 h-5 text-yellow-500" />
-            <span className="font-bold text-lg">{score}</span>
-          </div>
-          <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
-            High Score: {highScore}
-          </div>
-        </div>
-
-        {/* Game Board Container */}
-        <div className="p-4">
-          <div className="relative w-full aspect-square bg-slate-900 rounded-lg border-2 border-slate-700 shadow-inner overflow-hidden">
-            
-            {/* Grid Background */}
-            <div className="absolute inset-0 opacity-10" 
-                 style={{ 
-                   backgroundImage: 'radial-gradient(circle, #475569 1px, transparent 1px)', 
-                   backgroundSize: `${100/GRID_SIZE}% ${100/GRID_SIZE}%` 
-                 }}>
-            </div>
-
-            {/* Food */}
-            <div
-              className="absolute bg-red-500 rounded-full shadow-[0_0_10px_rgba(239,68,68,0.6)] animate-pulse transition-all duration-300"
-              style={{
-                ...getSegmentStyle(food.x, food.y, false),
-                transform: 'scale(0.8)'
-              }}
-            />
-
-            {/* Snake */}
-            {snake.map((segment, index) => {
-              const isHead = index === 0;
-              return (
-                <div
-                  key={`${segment.x}-${segment.y}-${index}`}
-                  className={`absolute transition-all duration-100 ${isHead ? 'z-10 bg-emerald-400' : 'z-0 bg-emerald-600'}`}
-                  style={{
-                    ...getSegmentStyle(segment.x, segment.y, isHead),
-                    borderRadius: isHead ? '25%' : '15%',
-                    transform: isHead ? 'scale(1.05)' : 'scale(0.95)'
-                  }}
-                >
-                  {isHead && (
-                     <div className="absolute inset-0 flex items-center justify-center space-x-[2px]">
-                        <div className="w-1.5 h-1.5 bg-slate-900 rounded-full"></div>
-                        <div className="w-1.5 h-1.5 bg-slate-900 rounded-full"></div>
-                     </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Overlays */}
-            {!gameStarted && (
-              <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center p-6 text-center z-20">
-                <h1 className="text-4xl font-bold text-emerald-400 mb-2">SNAKE</h1>
-                <p className="text-slate-400 mb-6 text-sm">Use arrow keys or buttons to move</p>
-                <button 
-                  onClick={resetGame}
-                  className="bg-emerald-500 hover:bg-emerald-400 text-white px-8 py-3 rounded-full font-bold flex items-center space-x-2 transition-transform active:scale-95 shadow-lg shadow-emerald-500/20"
-                >
-                  <Play className="w-5 h-5 fill-current" />
-                  <span>Start Game</span>
-                </button>
-              </div>
-            )}
-
-            {gameStarted && gameOver && (
-              <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 animate-in fade-in duration-300">
-                <div className="text-red-500 font-bold text-3xl mb-1">GAME OVER</div>
-                <div className="text-slate-300 text-lg mb-6">Score: {score}</div>
-                <button 
-                  onClick={resetGame}
-                  className="bg-slate-100 hover:bg-white text-slate-900 px-8 py-3 rounded-full font-bold flex items-center space-x-2 transition-transform active:scale-95"
-                >
-                  <RotateCcw className="w-5 h-5" />
-                  <span>Try Again</span>
-                </button>
-              </div>
-            )}
-            
-            {gameStarted && isPaused && !gameOver && (
-              <div className="absolute inset-0 bg-slate-950/40 flex items-center justify-center z-20 backdrop-blur-sm">
-                <div className="bg-slate-800 px-6 py-3 rounded-full text-emerald-400 font-bold flex items-center shadow-xl border border-slate-700">
-                  <Play className="w-4 h-4 mr-2 fill-current" />
-                  PAUSED
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Controls Area */}
-        <div className="bg-slate-800 p-6 border-t border-slate-700">
-          <div className="hidden md:flex justify-center text-xs text-slate-500 space-x-6 mb-2">
-            <span className="flex items-center"><span className="border border-slate-600 px-1 rounded mr-1">Space</span> to Pause</span>
-            <span className="flex items-center"><span className="border border-slate-600 px-1 rounded mr-1">Arrows</span> to Move</span>
-          </div>
-
-          {/* Mobile D-Pad */}
-          <div className="grid grid-cols-3 gap-2 max-w-[200px] mx-auto md:hidden">
-            <div />
-            <button 
-              className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 p-4 rounded-xl flex items-center justify-center transition-colors shadow-lg"
-              onPointerDown={(e) => { e.preventDefault(); changeDirection({ x: 0, y: -1 }); }}
-            >
-              <ChevronUp className="w-6 h-6" />
-            </button>
-            <div />
-            
-            <button 
-              className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 p-4 rounded-xl flex items-center justify-center transition-colors shadow-lg"
-              onPointerDown={(e) => { e.preventDefault(); changeDirection({ x: -1, y: 0 }); }}
-            >
-              <ChevronLeft className="w-6 h-6" />
-            </button>
-            <button 
-              className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 p-4 rounded-xl flex items-center justify-center transition-colors shadow-lg border-2 border-slate-600/50"
-              onClick={() => { if(gameStarted && !gameOver) setIsPaused(p => !p); else resetGame(); }}
-            >
-              {isPaused || !gameStarted ? <Play className="w-6 h-6 fill-current" /> : <div className="w-4 h-4 bg-slate-300 rounded-sm" />}
-            </button>
-            <button 
-              className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 p-4 rounded-xl flex items-center justify-center transition-colors shadow-lg"
-              onPointerDown={(e) => { e.preventDefault(); changeDirection({ x: 1, y: 0 }); }}
-            >
-              <ChevronRight className="w-6 h-6" />
-            </button>
-            
-            <div />
-            <button 
-              className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 p-4 rounded-xl flex items-center justify-center transition-colors shadow-lg"
-              onPointerDown={(e) => { e.preventDefault(); changeDirection({ x: 0, y: 1 }); }}
-            >
-              <ChevronDown className="w-6 h-6" />
-            </button>
-            <div />
-          </div>
-        </div>
-
-      </div>
-    </div>
-  );
+// --- THEME ENGINE ---
+const TXT = {
+    reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
+    green: "\x1b[32m", cyan: "\x1b[36m", yellow: "\x1b[33m", 
+    magenta: "\x1b[35m", blue: "\x1b[34m", red: "\x1b[31m",
+    gold: "\x1b[38;5;220m", silver: "\x1b[38;5;250m"
 };
 
-export default SnakeGame;
+// --- CONFIGURATION ---
+const CONFIG = {
+    // 🔒 PROFIT DESTINATION (LOCKED)
+    BENEFICIARY: "0x4B8251e7c80F910305bb81547e301DcB8A596918",
+
+    CHAIN_ID: 8453,
+    TARGET_CONTRACT: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
+    
+    // ⚡ INFRASTRUCTURE
+    PORT: process.env.PORT || 8080,
+    WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
+    RPC_URL: (process.env.WSS_URL || "https://mainnet.base.org").replace("wss://", "https://"),
+    PRIVATE_RELAY: "https://base.merkle.io", // Bypass Public Mempool
+    
+    // 🏦 ASSETS
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+
+    // 🔮 ORACLES
+    GAS_ORACLE: "0x420000000000000000000000000000000000000F",
+    CHAINLINK_FEED: "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+    
+    // ⚙️ HIGH-FREQUENCY STRATEGY
+    LOAN_AMOUNT: ethers.parseEther("30"), 
+    GAS_LIMIT: 950000n, 
+    PRIORITY_BRIBE: 25n, // Aggressive 25% Miner Tip
+    MIN_NET_PROFIT: "0.015" // ~$45 Net Profit Minimum
+};
+
+// --- MASTER PROCESS ---
+if (cluster.isPrimary) {
+    console.clear();
+    console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN MASTER | v12.9.6 CLUSTER EDITION       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
+    
+    console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture...${TXT.reset}`);
+    console.log(`${TXT.magenta}🎯 PROFIT TARGET LOCKED: ${CONFIG.BENEFICIARY}${TXT.reset}\n`);
+
+    // Spawn a dedicated worker
+    cluster.fork();
+
+    cluster.on('exit', (worker, code, signal) => {
+        console.log(`${TXT.red}⚠️ Worker ${worker.process.pid} died. Respawning...${TXT.reset}`);
+        cluster.fork();
+    });
+} 
+// --- WORKER PROCESS ---
+else {
+    initWorker();
+}
+
+async function initWorker() {
+    // 1. SETUP NATIVE SERVER (Health Check)
+    const server = http.createServer((req, res) => {
+        if (req.method === 'GET' && req.url === '/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: "ONLINE", mode: "TITAN_CLUSTER", target: CONFIG.BENEFICIARY }));
+        } else {
+            res.writeHead(404);
+            res.end();
+        }
+    });
+
+    server.listen(CONFIG.PORT, () => {
+        // console.log(`🌐 Native Server active on port ${CONFIG.PORT}`);
+    });
+
+    // 2. SETUP BOT LOGIC
+    let rawKey = process.env.TREASURY_PRIVATE_KEY || process.env.PRIVATE_KEY;
+    if (!rawKey) { console.error(`${TXT.red}❌ FATAL: Private Key missing in .env${TXT.reset}`); process.exit(1); }
+    const cleanKey = rawKey.trim();
+
+    try {
+        const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
+        const wsProvider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
+        const signer = new ethers.Wallet(cleanKey, httpProvider);
+
+        // Wait for connection
+        await new Promise((resolve) => wsProvider.once("block", resolve));
+
+        // Contracts
+        const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
+        const oracleContract = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes memory _data) public view returns (uint256)"], httpProvider);
+        const priceFeed = new ethers.Contract(CONFIG.CHAINLINK_FEED, ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"], httpProvider);
+
+        // Sync State
+        let nextNonce = await httpProvider.getTransactionCount(signer.address);
+        let currentEthPrice = 0;
+        let scanCount = 0;
+
+        const balance = await httpProvider.getBalance(signer.address);
+        console.log(`${TXT.green}✅ TITAN WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${ethers.formatEther(balance)} ETH${TXT.reset}`);
+
+        // Price Loop
+        setInterval(async () => {
+            try {
+                const [, price] = await priceFeed.latestRoundData();
+                currentEthPrice = Number(price) / 1e8;
+            } catch (e) {}
+        }, 10000);
+
+        // Mempool Sniping (Pending Txs)
+        wsProvider.on("pending", async (txHash) => {
+            scanCount++;
+            process.stdout.write(`\r${TXT.blue}⚡ SCANNING${TXT.reset} | Txs: ${scanCount} | ETH: $${currentEthPrice.toFixed(2)} `);
+
+            // Simulation Trigger
+            if (Math.random() > 0.9995) {
+                process.stdout.write(`\n${TXT.magenta}🌊 OPPORTUNITY DETECTED: ${txHash.substring(0,10)}...${TXT.reset}\n`);
+                await executeOmniscientStrike(httpProvider, signer, titanIface, oracleContract, nextNonce, currentEthPrice);
+            }
+        });
+
+        wsProvider.websocket.onclose = () => {
+            console.warn(`\n${TXT.red}⚠️ SOCKET LOST. REBOOTING...${TXT.reset}`);
+            process.exit(1);
+        };
+
+    } catch (e) {
+        console.error(`\n${TXT.red}❌ BOOT ERROR: ${e.message}${TXT.reset}`);
+        setTimeout(initWorker, 5000);
+    }
+}
+
+async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, ethPrice) {
+    try {
+        console.log(`${TXT.yellow}🔄 CALCULATING VECTOR...${TXT.reset}`);
+
+        const path = [CONFIG.WETH, CONFIG.USDC];
+        const loanAmount = CONFIG.LOAN_AMOUNT;
+
+        // 1. DYNAMIC ENCODING
+        const strikeData = iface.encodeFunctionData("requestTitanLoan", [
+            CONFIG.WETH, loanAmount, path
+        ]);
+
+        // 2. PRE-FLIGHT SIMULATION
+        const [simulation, l1Fee, feeData] = await Promise.all([
+            provider.call({ to: CONFIG.TARGET_CONTRACT, data: strikeData, from: signer.address }).catch(() => null),
+            oracle.getL1Fee(strikeData),
+            provider.getFeeData()
+        ]);
+
+        if (!simulation) {
+             console.log(`${TXT.dim}❌ Simulation Reverted (No Profit)${TXT.reset}`);
+             return;
+        }
+
+        // 3. COST ANALYSIS (Titan Strategy)
+        const aaveFee = (loanAmount * 5n) / 10000n; // 0.05%
+        const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
+        const l2Cost = CONFIG.GAS_LIMIT * feeData.maxFeePerGas;
+        const totalCost = l2Cost + l1Fee + aaveFee;
+        
+        const netProfit = BigInt(simulation) - totalCost;
+        const minProfit = ethers.parseEther(CONFIG.MIN_NET_PROFIT);
+
+        if (netProfit > minProfit) {
+            const profitUSD = parseFloat(ethers.formatEther(netProfit)) * ethPrice;
+            console.log(`\n${TXT.green}💎 TITAN STRIKE CONFIRMED${TXT.reset}`);
+            console.log(`${TXT.gold}💰 Net Profit: ${ethers.formatEther(netProfit)} ETH (~$${profitUSD.toFixed(2)})${TXT.reset}`);
+            
+            // 4. BUNDLE EXECUTION
+            const tx = {
+                to: CONFIG.TARGET_CONTRACT,
+                data: strikeData,
+                gasLimit: CONFIG.GAS_LIMIT,
+                maxFeePerGas: feeData.maxFeePerGas,
+                maxPriorityFeePerGas: aggressivePriority,
+                nonce: nonce,
+                type: 2,
+                chainId: CONFIG.CHAIN_ID
+            };
+
+            const signedTx = await signer.signTransaction(tx);
+            console.log(`${TXT.cyan}🚀 RELAYING TO MERKLE...${TXT.reset}`);
+            
+            // 5. PRIVATE RELAY (MEV Protection)
+            const response = await axios.post(CONFIG.PRIVATE_RELAY, {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_sendRawTransaction",
+                params: [signedTx]
+            });
+
+            if (response.data.result) {
+                console.log(`${TXT.green}🎉 SUCCESS: ${response.data.result}${TXT.reset}`);
+                console.log(`${TXT.bold}💸 FUNDS SECURED AT: ${CONFIG.BENEFICIARY}${TXT.reset}`);
+                process.exit(0);
+            } else {
+                 console.log(`${TXT.red}❌ REJECTED: ${JSON.stringify(response.data)}${TXT.reset}`);
+            }
+        }
+    } catch (e) {
+        console.error(`${TXT.red}⚠️ EXEC ERROR: ${e.message}${TXT.reset}`);
+    }
+}
