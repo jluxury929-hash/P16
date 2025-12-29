@@ -1,3 +1,7 @@
+// ENVIRONMENT: React (Frontend) - Run in Browser/Canvas
+// NOTE: This is a VISUAL SIMULATION of an MEV Bot Strategy. 
+// Do not run this file as a Node.js server script (e.g., 'node server.js').
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   TrendingUp, 
@@ -89,7 +93,7 @@ const ApexTitanSimulator = () => {
     // Boot Sequence
     const bootSequence = [
       { text: "╔════════════════════════════════════════════════════════╗", color: "text-amber-400 font-bold" },
-      { text: "║    ⚡ APEX TITAN LEGIT | WHALE HUNTER EDITION v3.0     ║", color: "text-amber-400 font-bold" },
+      { text: "║    ⚡ APEX TITAN LEGIT | WHALE HUNTER EDITION v3.1     ║", color: "text-amber-400 font-bold" },
       { text: "╚════════════════════════════════════════════════════════╝", color: "text-amber-400 font-bold" },
       { text: "[SYSTEM] Spawning 32 Ultra-Low Latency Workers...", color: "text-cyan-400" },
       { text: "[INFO] Mempool Connection: 10Gbps Direct Link. Private Relays Active.", color: "text-gray-500" },
@@ -122,8 +126,9 @@ const ApexTitanSimulator = () => {
         // 1. Calculate Flash Loan Cost (0.05% fee)
         const flashFee = (flashLoanAmount * 0.05) / 100;
         
-        // 2. Simulate Gross Profit (WHALE LOGIC: 0.5 to 4.0 ETH profit range)
-        const mockGrossProfit = (Math.random() * 3.5) + 0.5; 
+        // 2. Simulate Gross Profit (WHALE LOGIC: 0.85 to 4.35 ETH profit range)
+        // Updated to ensure minimum 'Whale' profit of 0.85 ETH as requested
+        const mockGrossProfit = (Math.random() * 3.5) + 0.85; 
         
         // 3. Dynamic Bribe Calculation
         let bribePercent = 40;
@@ -147,8 +152,8 @@ const ApexTitanSimulator = () => {
            newLogs.push({ text: "   💎 OPPORTUNITY CONFIRMED | Executing Private Bundle...", color: "text-emerald-400 font-bold" });
            
            // Win/Loss Simulation (Guaranteed / High Probability Mode)
-           // 98% Win Rate
-           if (Math.random() > 0.02) { 
+           // 99.9% Win Rate (Updated from 98%)
+           if (Math.random() > 0.001) { 
              newLogs.push({ text: "   ✅ BUNDLE SECURED! ATOMIC PROFIT EXTRACTED.", color: "text-emerald-500 font-bold" });
              setTotalProfit(prev => prev + netProfit);
            } else {
@@ -504,8 +509,3 @@ export default function MillionaireBlueprint() {
         <footer className="mt-16 text-center text-gray-600 text-xs">
           <p>This tool is for educational and visualization purposes only. <br/>Results strictly dependent on execution, market conditions, and relentless drive.</p>
         </footer>
-
-      </div>
-    </div>
-  );
-}
